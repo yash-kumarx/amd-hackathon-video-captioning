@@ -1,0 +1,279 @@
+"""Orchestrator: tasks.json → results.json with per-clip deadline and failure ladder.
+
+Crash-safety: results.json is pre-filled with valid degraded captions for ALL tasks
+immediately, then rewritten after each clip completes — a hard kill mid-run still
+leaves a complete, schema-valid file (all four styles, never empty).
+"""
+import asyncio
+import json
+import logging
+import os
+import time
+from typing import Dict, List, Optional
+
+import httpx
+
+from . import config, extract, grounding, ocr, style, transcribe
+from .schemas import Captions, GroundedFacts, Result, Task
+from .util import Stopwatch, chat_completion, errstr, spend_summary
+
+log = logging.getLogger("pipeline.run")
+
+_results_lock = asyncio.Lock()
+
+
+def load_tasks(path: str) -> List[Task]:
+    with open(path) as f:
+        raw = json.load(f)
+    return [Task(**t) for t in raw]
+
+
+async def write_results(results: Dict[str, Dict[str, str]], order: List[str]) -> None:
+    """Atomic write, stable task order."""
+    payload = [
+        Result(task_id=tid, captions=Captions(**results[tid])).model_dump()
+        for tid in order
+    ]
+    os.makedirs(os.path.dirname(config.OUTPUT_PATH) or ".", exist_ok=True)
+    tmp = config.OUTPUT_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, config.OUTPUT_PATH)
+
+
+async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
+    """Full pipeline for one clip; every stage degrades rather than raises.
+
+    Latency plan (28s wall): extraction ≤4s → grounding ∥ transcription ∥ OCR ≤9s
+    → Gemma styling (measured ~17.5s; thinking unstrippable) raced against the
+    deadline with a fast Kimi backup — whichever valid result exists at the wire
+    wins, Gemma preferred.
+    """
+    sw = Stopwatch(config.CLIP_DEADLINE)
+    workdir = os.path.join(config.WORK_DIR, task.task_id)
+    os.makedirs(workdir, exist_ok=True)
+    styles = [s for s in config.ALL_STYLES]  # contract: always emit all four
+    facts = GroundedFacts()
+    frames: List[Dict[str, object]] = []
+    duration = 0.0
+    transcript: Optional[str] = None
+    try:
+        # --- Stage 0-1: download, probe, frames ---
+        video = os.path.join(workdir, "video.mp4")
+        await extract.download_video(client, task.video_url, video)
+        meta = await extract.probe(video)
+        duration = meta["duration"]
+        frames = await extract.extract_frames(video, workdir, duration)
+        log.info("[%s] %.1fs video, %d frames, audio=%s (t=%.1fs)",
+                 task.task_id, duration, len(frames), meta["has_audio"], sw.elapsed)
+
+        # --- Stage 1b/1c ∥ Stage 2: transcription and OCR run concurrent with grounding.
+        # Grounding goes frames-only; transcript/OCR enrich the facts afterward.
+        async def get_transcript() -> Optional[str]:
+            if not (config.ENABLE_AUDIO and meta["has_audio"] and sw.remaining > 12):
+                return None
+            wav = await extract.extract_audio(video, workdir)
+            if not wav:
+                return None
+            return await transcribe.transcribe(client, wav)
+
+        async def get_ocr() -> List[str]:
+            if not config.ENABLE_OCR:
+                return []
+            return await ocr.ocr_frames([f["path"] for f in frames])
+
+        async def get_grounding(ocr_task: "asyncio.Task[List[str]]") -> GroundedFacts:
+            # OCR is local and fast — worth a short wait so Kimi sees verified text
+            ocr_text: List[str] = []
+            try:
+                ocr_text = await asyncio.wait_for(asyncio.shield(ocr_task), timeout=3.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+            return await grounding.ground(client, frames, duration, None, ocr_text)
+
+        ocr_task = asyncio.ensure_future(get_ocr())
+        gtimeout = min(config.GROUNDING_TIMEOUT + 4, max(5.0, sw.remaining - 8))
+        g_res, t_res = await asyncio.gather(
+            asyncio.wait_for(get_grounding(ocr_task), timeout=gtimeout),
+            get_transcript(),
+            return_exceptions=True,
+        )
+        if not ocr_task.done():
+            ocr_task.cancel()
+        if isinstance(g_res, GroundedFacts):
+            facts = g_res
+        else:
+            log.warning("[%s] grounding failed: %s", task.task_id, errstr(g_res))
+        transcript = t_res if isinstance(t_res, str) else None
+        if transcript and not transcript.startswith("NO_SPEECH"):
+            facts.audio_summary = (facts.audio_summary + " | " if facts.audio_summary else "") + \
+                f"speech transcript: {transcript[:800]}"
+        elif transcript:
+            facts.audio_summary = facts.audio_summary or transcript[:200]
+        log.info("[%s] grounded: %s (t=%.1fs)", task.task_id,
+                 json.dumps(facts.compact(), ensure_ascii=False)[:180], sw.elapsed)
+    except Exception as e:
+        log.warning("[%s] extraction/grounding degraded: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
+
+    # --- Stages 3-5: Gemma styling, raced against the clip deadline ---
+    captions: Dict[str, str] = {}
+    styled_by = "ladder"
+    gemma_task: Optional[asyncio.Task] = None
+    kimi_task: Optional[asyncio.Task] = None
+    try:
+        n = config.BEST_OF_N
+        gemma_started = asyncio.Event()
+        gemma_task = asyncio.ensure_future(
+            style.generate_candidates(client, facts, styles, n, timeout=25.0,
+                                      started=gemma_started)
+        )
+        cands: Dict[str, List[str]] = {}
+        # Wait for the serial Gemma lane; if it doesn't free up while a full Gemma
+        # round (~12s) still fits in the budget, skip straight to the Kimi lane.
+        lane_wait = max(0.1, sw.remaining - 13.0)
+        got_lane = True
+        try:
+            await asyncio.wait_for(gemma_started.wait(), timeout=lane_wait)
+        except asyncio.TimeoutError:
+            got_lane = False
+            log.warning("[%s] gemma lane busy for %.1fs — going straight to Kimi",
+                        task.task_id, lane_wait)
+        if got_lane:
+            # Grace is timed from the actual HTTP start, reserving the backup lane's share.
+            # If the leftover grace can't fit a realistic Gemma round, don't burn it —
+            # hand the full window to Kimi instead.
+            grace = min(config.STYLE_GRACE, max(0.0, sw.remaining - config.BACKUP_RESERVE))
+            if grace < config.GEMMA_MIN_GRACE:
+                got_lane = False
+                gemma_task.cancel()
+                log.warning("[%s] only %.1fs grace available — skipping gemma, going straight to Kimi",
+                            task.task_id, grace)
+            else:
+                try:
+                    cands = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=grace)
+                except asyncio.TimeoutError:
+                    log.warning("[%s] gemma not done after %.1fs grace — starting Kimi backup racer",
+                                task.task_id, grace)
+                except Exception as e:
+                    log.warning("[%s] gemma styling failed: %s", task.task_id, errstr(e))
+
+        if cands:
+            winners = {s: c[0] for s, c in cands.items()}
+            if config.ENABLE_JUDGE and n > 1 and sw.remaining > config.JUDGE_TIMEOUT + 3:
+                winners = await style.judge_rerank(client, facts, cands, config.JUDGE_TIMEOUT)
+            if config.ENABLE_CRITIQUE and sw.remaining > config.CRITIQUE_TIMEOUT + 3:
+                winners = await style.critique_repair(client, facts, winners, config.CRITIQUE_TIMEOUT)
+            captions = winners
+            styled_by = "gemma"
+            log.info("[%s] gemma styled %d/%d styles (t=%.1fs)",
+                     task.task_id, len(captions), len(styles), sw.elapsed)
+        else:
+            # Kimi backup racer; Gemma keeps running and reclaims the win if it lands in time
+            kimi_task = asyncio.ensure_future(
+                style.style_via_fireworks_fallback(
+                    client, facts, styles,
+                    min(config.KIMI_STYLE_TIMEOUT, max(4.0, sw.remaining - 2)),
+                    frames=frames)
+            )
+            gemma_extra = max(0.3, sw.remaining - 5.0) if got_lane else 0.0
+            if gemma_extra > 0:
+                try:
+                    cands = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=gemma_extra)
+                    captions = {s: c[0] for s, c in cands.items()}
+                    styled_by = "gemma"
+                    log.info("[%s] gemma reclaimed the race (t=%.1fs)", task.task_id, sw.elapsed)
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            if not captions:
+                # Gemma lost for good on this clip — free the serial lane immediately
+                if not gemma_task.done():
+                    gemma_task.cancel()
+                try:
+                    captions = await asyncio.wait_for(
+                        asyncio.shield(kimi_task), timeout=max(0.5, sw.remaining - 0.5))
+                    styled_by = "kimi-backup"
+                    log.info("[%s] kimi backup styled %d styles (t=%.1fs)",
+                             task.task_id, len(captions), sw.elapsed)
+                except Exception as e2:
+                    log.warning("[%s] kimi backup failed too: %s", task.task_id, errstr(e2))
+    except Exception as e:
+        log.warning("[%s] styling stage error: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
+    finally:
+        for t in (gemma_task, kimi_task):
+            if t is not None and not t.done():
+                t.cancel()
+
+    final = style.sanitize(captions, facts, styles, duration)
+    extract.cleanup(workdir)
+    log.info("[%s] DONE in %.1fs (styled_by=%s)", task.task_id, sw.elapsed, styled_by)
+    return final
+
+
+async def run() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    t0 = time.monotonic()
+    try:
+        tasks = load_tasks(config.INPUT_PATH)
+    except Exception as e:
+        log.error("cannot read %s: %s — writing empty results", config.INPUT_PATH, e)
+        os.makedirs(os.path.dirname(config.OUTPUT_PATH) or ".", exist_ok=True)
+        with open(config.OUTPUT_PATH, "w") as f:
+            json.dump([], f)
+        return 0
+
+    order = [t.task_id for t in tasks]
+    # Pre-fill: a complete valid file exists from the first second
+    results: Dict[str, Dict[str, str]] = {
+        t.task_id: style.degraded_captions(GroundedFacts(), config.ALL_STYLES, 0.0) for t in tasks
+    }
+    await write_results(results, order)
+
+    clip_sem = asyncio.Semaphore(config.CLIP_CONCURRENCY)
+    style.init_concurrency()
+    limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+
+    async with httpx.AsyncClient(limits=limits) as client:
+        async def worker(task: Task, index: int) -> None:
+            # Stagger starts to pipeline clips through the serial Gemma lane; a clip's
+            # 30s clock starts at ITS processing start, so waiting here costs nothing
+            # against the per-request budget (total runtime stays well under 10 min).
+            if index and config.CLIP_STAGGER > 0:
+                await asyncio.sleep(index * config.CLIP_STAGGER)
+            async with clip_sem:
+                try:
+                    captions = await asyncio.wait_for(
+                        process_clip(client, task),
+                        timeout=config.CLIP_DEADLINE + 2,  # absolute backstop < 30s
+                    )
+                except Exception as e:
+                    log.error("[%s] clip hard-failed: %s — degraded captions stand", task.task_id, errstr(e))
+                    return
+                async with _results_lock:
+                    results[task.task_id] = captions
+                    await write_results(results, order)
+
+        async def warm(base: str, key: str, payload: Dict, provider: str) -> None:
+            try:
+                await chat_completion(client, base, key, payload, timeout=12, retries=0, provider=provider)
+            except Exception:
+                pass
+
+        # Fire-and-forget connection warmup (TLS + TTFB) while first downloads run
+        asyncio.ensure_future(warm(
+            config.GEMINI_OPENAI_BASE, config.GEMINI_API_KEY,
+            {"model": config.GEMMA_MODEL, "max_tokens": 32,
+             "messages": [{"role": "user", "content": "Say OK"}]}, "gemini"))
+        asyncio.ensure_future(warm(
+            config.FIREWORKS_BASE, config.FIREWORKS_API_KEY,
+            {"model": config.VISION_MODEL, "max_tokens": 8, "reasoning_effort": "none",
+             "messages": [{"role": "user", "content": "Say OK"}]}, "fireworks"))
+
+        await asyncio.gather(*(worker(t, i) for i, t in enumerate(tasks)))
+
+    await write_results(results, order)
+    log.info("ALL DONE: %d clips in %.1fs. Spend: %s", len(tasks), time.monotonic() - t0, spend_summary())
+    return 0

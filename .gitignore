@@ -1,0 +1,10 @@
+.env
+local_io/
+dev_clips/
+__pycache__/
+*.pyc
+.DS_Store
+container_io/
+CLAUDE.md
+RESEARCH.md
+STATUS.md
