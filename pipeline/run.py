@@ -41,7 +41,8 @@ async def write_results(results: Dict[str, Dict[str, str]], order: List[str]) ->
     os.replace(tmp, config.OUTPUT_PATH)
 
 
-async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
+async def process_clip(client: httpx.AsyncClient, task: Task,
+                       bank=None) -> Dict[str, str]:
     """Full pipeline for one clip; every stage degrades rather than raises.
 
     Latency plan (28s wall): extraction ≤4s → grounding ∥ transcription ∥ OCR ≤9s
@@ -112,6 +113,13 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
             facts.audio_summary = facts.audio_summary or transcript[:200]
         log.info("[%s] grounded: %s (t=%.1fs)", task.task_id,
                  json.dumps(facts.compact(), ensure_ascii=False)[:180], sw.elapsed)
+        if bank is not None:
+            # Insurance: bank a facts-aware ladder NOW so even a hard-killed clip shows
+            # scene-specific captions instead of the generic pre-fill.
+            try:
+                await bank(style.degraded_captions(facts, styles, duration))
+            except Exception:
+                pass
     except Exception as e:
         log.warning("[%s] extraction/grounding degraded: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
 
@@ -182,9 +190,13 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
                      task.task_id, len(styles), sw.elapsed)
         else:
             # Gemma didn't fully land. Give it a short residual chance if still mid-flight,
-            # then collect the banked Kimi floor (started at styling-start, generous timeout).
+            # then collect the banked Kimi floor. When Kimi is already banked, cap the
+            # residual at 4s — finishing at ~17s beats gambling the whole window on Gemma.
             gemma_extra = max(0.0, sw.remaining - (config.KIMI_STYLE_TIMEOUT + 1.0)) \
                 if got_lane and not gemma_task.done() else 0.0
+            if kimi_task is not None and kimi_task.done() and not kimi_task.cancelled() \
+                    and kimi_task.exception() is None and kimi_task.result():
+                gemma_extra = min(gemma_extra, 4.0)
             if gemma_extra > 1.0:
                 try:
                     late = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=gemma_extra)
@@ -274,17 +286,21 @@ async def run() -> int:
             if index and stagger > 0:
                 await asyncio.sleep(index * stagger)
             async with clip_sem:
+                async def bank(caps: Dict[str, str]) -> None:
+                    async with _results_lock:
+                        results[task.task_id] = caps
+                        await write_results(results, order)
+
                 try:
                     captions = await asyncio.wait_for(
-                        process_clip(client, task),
+                        process_clip(client, task, bank=bank),
                         timeout=config.CLIP_DEADLINE + 2,  # absolute backstop < 30s
                     )
                 except Exception as e:
-                    log.error("[%s] clip hard-failed: %s — degraded captions stand", task.task_id, errstr(e))
+                    log.error("[%s] clip hard-failed: %s — banked/degraded captions stand",
+                              task.task_id, errstr(e))
                     return
-                async with _results_lock:
-                    results[task.task_id] = captions
-                    await write_results(results, order)
+                await bank(captions)
 
         async def warm(base: str, key: str, payload: Dict, provider: str) -> None:
             try:

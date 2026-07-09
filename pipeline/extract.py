@@ -91,10 +91,15 @@ async def extract_frames(path: str, out_dir: str, duration: float) -> List[Dict]
     times = [duration * (i + 0.5) / n for i in range(n)] if duration > 0 else [0.0]
     vf = f"scale='if(gt(iw,ih),min({config.FRAME_LONG_EDGE},iw),-2)':'if(gt(iw,ih),-2,min({config.FRAME_LONG_EDGE},ih))'"
 
+    # Long clips: decode only keyframes (~10x faster on UHD sources; sampled frames
+    # snap to the nearest keyframe, which is fine at 25s+ durations). Short clips may
+    # have very few keyframes, so they keep full decode.
+    skip = ["-skip_frame", "nokey"] if duration > 25 else []
+
     async def grab(i: int, t: float) -> Optional[Dict]:
         fp = os.path.join(out_dir, f"f{i:02d}.jpg")
         code, _, err = await _run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", path,
+            ["ffmpeg", "-y", "-loglevel", "error", *skip, "-ss", f"{t:.3f}", "-i", path,
              "-frames:v", "1", "-vf", vf, "-q:v", str(config.FRAME_JPEG_Q), fp],
             timeout=8,
         )

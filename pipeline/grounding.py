@@ -78,28 +78,30 @@ async def ground(
     """Primary attempt on k2p6; if it misses its window, race a k2p6 retry against
     k2p5 in parallel (Fireworks allows concurrency; latency variance is the enemy)."""
     payload_base = {
-        "max_tokens": 600,
+        "max_tokens": 400,
         "temperature": 0.1,
         "reasoning_effort": "none",
         "messages": [
             {"role": "system", "content": SYSTEM.format(duration=duration)},
-            {"role": "user", "content": _user_content(frames, transcript, ocr_text)},
+            {"role": "user", "content": _user_content(frames[:6], transcript, ocr_text)},
         ],
     }
+    # Speed-first: one primary attempt, then one parallel race — hard-capped so the
+    # whole stage never exceeds ~GROUNDING_TIMEOUT+4 (styling needs the rest of the 25s).
     try:
         facts = await _ground_once(client, payload_base, config.VISION_MODEL,
-                                   timeout=config.GROUNDING_TIMEOUT * 0.8)
+                                   timeout=config.GROUNDING_TIMEOUT)
         if facts:
             return facts
     except Exception as e:
         log.warning("grounding primary failed: %s", str(e)[:120])
 
     racers = [
-        asyncio.ensure_future(_ground_once(client, payload_base, m, timeout=config.GROUNDING_TIMEOUT))
+        asyncio.ensure_future(_ground_once(client, payload_base, m, timeout=4.5))
         for m in (config.VISION_MODEL, config.VISION_MODEL_FALLBACK)
     ]
     try:
-        for fut in asyncio.as_completed(racers, timeout=config.GROUNDING_TIMEOUT + 1):
+        for fut in asyncio.as_completed(racers, timeout=5.0):
             try:
                 facts = await fut
                 if facts:
