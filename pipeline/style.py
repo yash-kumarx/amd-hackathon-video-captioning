@@ -479,6 +479,79 @@ async def style_via_fireworks_fallback(
     return {s: c[0] for s, c in sets.items() if c}
 
 
+_flash_sem: Optional[asyncio.Semaphore] = None
+_flash_last = [0.0]
+
+
+async def flash_style_set(
+    client: httpx.AsyncClient, facts: GroundedFacts, styles: List[str], timeout: float,
+    frames: Optional[List[Dict]] = None,
+) -> Dict[str, str]:
+    """Third candidate set from gemini-2.5-flash (free tier, separate quota from Gemma,
+    strong native vision). Paced by a small semaphore + min-gap to stay under free-tier
+    RPM. Fails fast on quota exhaustion — the race degrades to Kimi/Gemma unharmed."""
+    global _flash_sem
+    if _flash_sem is None:
+        _flash_sem = asyncio.Semaphore(2)
+    rubric_lines = "\n".join(
+        f"- {s}: {RUBRICS[s]}\n  Example of the register (do NOT copy content): {EXEMPLARS[s]}"
+        for s in styles
+    )
+    shape = "{" + ", ".join('"{}": "..."'.format(s) for s in styles) + "}"
+    sys_txt = (
+        "You write video captions in requested styles. Every caption MUST be factually grounded "
+        "in what the keyframes actually show — do not add events, objects, brands, or claims "
+        "that are not there. Identify the main subject correctly before writing. "
+        "Never mention missing audio, playback speed, or video/encoding artifacts. "
+        f"English only. Each caption is 1-2 sentences, {config.WORD_MIN}-{config.WORD_MAX} words — "
+        f"NEVER exceed {config.WORD_MAX} words, end every caption as a complete sentence. "
+        "Make each caption SPECIFIC to this video and the four styles clearly distinct. "
+        "CRITICAL for the humorous/sarcastic styles: the joke must come from the REAL visible "
+        "situation — never invent gestures, micro-events, sounds, or outcomes not clearly shown. "
+        f"Return STRICT JSON only (no markdown fences): {shape}"
+    )
+    have_facts = bool(facts.subjects or facts.setting or facts.actions
+                      or facts.audio_summary or facts.on_screen_text)
+    facts_line = f"Context hints (may be imperfect): {_facts_str(facts)}\n\n" if have_facts else ""
+    parts: List[Dict] = [{
+        "type": "text",
+        "text": (f"{facts_line}Look at these ordered keyframes and identify what is really shown, "
+                 f"then write captions.\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n"
+                 "Write 1 caption per style. STRICT JSON now."),
+    }]
+    for f in (frames or [])[: config.FLASH_STYLE_FRAMES]:
+        parts.append({"type": "image_url",
+                      "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
+    payload = {
+        "model": config.FLASH_STYLE_MODEL,
+        "max_tokens": 900,
+        "temperature": 0.7,
+        "messages": [
+            {"role": "system", "content": sys_txt},
+            {"role": "user", "content": parts},
+        ],
+    }
+    import time as _t
+    async with _flash_sem:
+        gap = 1.2 - (_t.monotonic() - _flash_last[0])
+        if gap > 0:
+            await asyncio.sleep(gap)
+        _flash_last[0] = _t.monotonic()
+        resp = await chat_completion(
+            client, config.GEMINI_OPENAI_BASE, config.GEMINI_API_KEY,
+            payload, timeout=timeout, retries=0, provider="gemini",
+        )
+    lowered = _norm_style_dict(extract_json(strip_thought(message_content(resp))) or {}, styles)
+    out = {}
+    for s in styles:
+        v = lowered.get(s)
+        if isinstance(v, list):
+            v = v[0] if v else ""
+        if isinstance(v, (str, int, float)) and str(v).strip():
+            out[s] = str(v).strip()
+    return out
+
+
 def _short_scene(facts: GroundedFacts) -> str:
     """A SHORT (<=12 word) scene phrase from facts — never a facts dump, no duplication."""
     subj = " ".join((facts.subjects[0] if facts.subjects else "").split()[:4]).strip()
@@ -500,10 +573,11 @@ def _short_scene(facts: GroundedFacts) -> str:
 async def pick_from_pools(
     client: httpx.AsyncClient, frames: Optional[List[Dict]],
     pools: Dict[str, List[str]], styles: List[str], timeout: float,
+    provider: str = "fireworks",
 ) -> Dict[str, str]:
     """Frame-grounded verifier: for each style, pick the best of 2-3 candidate
     captions on the two judged axes (accuracy to the frames + style match). One fast
-    Kimi call; on any failure returns each pool's first candidate."""
+    call (gemini-flash or Kimi); on any failure returns each pool's first candidate."""
     fallback = {s: pools[s][0] for s in styles if pools.get(s)}
     if not any(len(pools.get(s, [])) > 1 for s in styles):
         return fallback
@@ -531,19 +605,29 @@ async def pick_from_pools(
     for f in (frames or [])[:4]:
         parts.append({"type": "image_url",
                       "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
-    payload = {
-        "model": config.TEXT_FALLBACK_MODEL,
-        "max_tokens": 200,
-        "temperature": 0.0,
-        "reasoning_effort": "none",
-        "messages": [{"role": "user", "content": parts}],
-    }
+    if provider == "gemini":
+        payload = {
+            "model": config.FLASH_STYLE_MODEL,
+            "max_tokens": 250,
+            "temperature": 0.0,
+            "messages": [{"role": "user", "content": parts}],
+        }
+        base, key = config.GEMINI_OPENAI_BASE, config.GEMINI_API_KEY
+    else:
+        payload = {
+            "model": config.TEXT_FALLBACK_MODEL,
+            "max_tokens": 200,
+            "temperature": 0.0,
+            "reasoning_effort": "none",
+            "messages": [{"role": "user", "content": parts}],
+        }
+        base, key = config.FIREWORKS_BASE, config.FIREWORKS_API_KEY
     try:
         resp = await chat_completion(
-            client, config.FIREWORKS_BASE, config.FIREWORKS_API_KEY, payload,
-            timeout=timeout, retries=0,
+            client, base, key, payload,
+            timeout=timeout, retries=0, provider=provider if provider == "gemini" else "fireworks",
         )
-        data = extract_json(message_content(resp)) or {}
+        data = extract_json(strip_thought(message_content(resp))) or {}
         out = {}
         picks = []
         for s in styles:

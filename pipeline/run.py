@@ -138,6 +138,7 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
     styled_by = "ladder"
     gemma_task: Optional[asyncio.Task] = None
     kimi_task: Optional[asyncio.Task] = None
+    flash_task: Optional[asyncio.Task] = None
     try:
         n = config.BEST_OF_N
         gemma_started = asyncio.Event()
@@ -152,6 +153,13 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                 min(config.KIMI_STYLE_TIMEOUT, max(4.0, sw.remaining - 2)),
                 frames=frames)
         )
+        # Third candidate set on gemini-flash (separate provider AND separate quota —
+        # pure parallel upside; fails fast on quota exhaustion and costs nothing).
+        if config.ENABLE_FLASH_STYLE and frames:
+            flash_task = asyncio.ensure_future(
+                style.flash_style_set(
+                    client, facts, styles,
+                    min(9.0, max(4.0, sw.remaining - 2)), frames=frames))
         cands: Dict[str, List[str]] = {}
         # Wait for the serial Gemma lane up to the point where a minimal Gemma round
         # could still finish before the wire; past that, Gemma can't win anyway.
@@ -233,10 +241,35 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                     lvl = log.warning if styled_by == "kimi-backup" else log.info
                     lvl("[%s] GEMMA MISSED — styled via %s, %d/%d styles (t=%.1fs)",
                         task.task_id, styled_by, len(captions), len(styles), sw.elapsed)
+
+        # --- Additive verify step: if the flash set also landed, let a fast frame-
+        # grounded verifier pick per style between the primary result and flash's.
+        # Strictly optional: any failure or time pressure leaves `captions` untouched.
+        if (captions and len(captions) == len(styles) and flash_task is not None
+                and sw.remaining > 4.5):
+            flash_set: Dict[str, str] = {}
+            try:
+                flash_set = await asyncio.wait_for(
+                    asyncio.shield(flash_task), timeout=max(0.3, sw.remaining - 4.2))
+            except (asyncio.TimeoutError, Exception):
+                pass
+            if flash_set and len(flash_set) == len(styles) and sw.remaining > 4.0:
+                pools = {s: [captions[s], flash_set[s]] for s in styles}
+                try:
+                    picked = await style.pick_from_pools(
+                        client, frames, pools, styles,
+                        timeout=min(4.5, max(2.0, sw.remaining - 1.0)),
+                        provider="gemini")
+                    if picked and all(picked.get(s) for s in styles):
+                        captions = picked
+                        styled_by += "+flash-verified"
+                        log.info("[%s] flash verify applied (t=%.1fs)", task.task_id, sw.elapsed)
+                except Exception:
+                    pass
     except Exception as e:
         log.warning("[%s] styling stage error: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
     finally:
-        for t in (gemma_task, kimi_task):
+        for t in (gemma_task, kimi_task, flash_task):
             if t is not None and not t.done():
                 t.cancel()
 
