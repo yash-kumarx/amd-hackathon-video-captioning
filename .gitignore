@@ -14,3 +14,5 @@ eval/out_*/
 eval/scores_*.json
 eval/wm_fetch.log
 pipeline/.idea/
+pipeline/_creds.py
+gen_creds.py
