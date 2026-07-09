@@ -29,16 +29,18 @@ RUBRICS = {
     "sarcastic": (
         "Dry, ironic understatement or mock-praise; humor comes from the incongruity between "
         "a grand tone and mundane content. Deadpan delivery. Never mean-spirited, never breaks the facts. "
-        "Anchor the sarcasm in an emotion the viewer would plausibly feel (boredom, faux awe, mock suspense)."
+        "Anchor the sarcasm in an emotion the viewer would plausibly feel (boredom, faux awe, mock suspense). "
+        "Vary your opening — do NOT default to 'Behold'."
     ),
     "humorous_tech": (
         "Playful humor built on ONE central tech/programming metaphor that genuinely fits what happens "
         "in the video (a bug, a deploy, latency, buffering, a reboot…) — developed cleanly, not a pile "
-        "of stacked jargon. The joke should still land for a non-engineer."
+        "of stacked jargon. Name the actual subject doing the actual action; the metaphor decorates "
+        "the truth, it never replaces it. The joke should still land for a non-engineer."
     ),
     "humorous_non_tech": (
         "Warm, everyday, relatable humor — witty-friend narration. Absolutely no tech jargon. "
-        "Humor from everyday incongruity and charm."
+        "Observational comedy about what is REALLY happening on screen, not an invented skit."
     ),
 }
 
@@ -58,6 +60,8 @@ GEN_SYSTEM = (
     "hallucination and against its rubric for register, keep only the sharper one — then answer. "
     "Make each caption SPECIFIC to this video (name its actual subjects/actions, not generic filler), "
     "and make the four styles clearly distinct from each other. "
+    "CRITICAL for the humorous/sarcastic styles: the joke must come from the REAL situation in "
+    "FACTS — never invent gestures, micro-events, sounds, or outcomes not present there. "
     "Return STRICT JSON only (no markdown fences): {shape} "
     "with exactly {n} caption(s) per style."
 )
@@ -359,13 +363,12 @@ async def critique_repair(
     return winners
 
 
-async def style_via_fireworks_fallback(
+async def kimi_style_sets(
     client: httpx.AsyncClient, facts: GroundedFacts, styles: List[str], timeout: float,
-    frames: Optional[List[Dict]] = None,
-) -> Dict[str, str]:
-    """Reliable styling lane on Kimi K2.6 (Fireworks). Runs in parallel with the Gemma
-    lane from styling start (Gemma preferred at the wire; this is the floor that means
-    no clip ever falls to the template ladder in a congested Gemini window).
+    frames: Optional[List[Dict]] = None, temperature: float = 0.6, n: int = 1,
+) -> Dict[str, List[str]]:
+    """Reliable styling lane on Kimi K2.6 (Fireworks), returning n candidate(s) per
+    style from ONE call. Runs in parallel with the Gemma lane from styling start.
 
     MULTIMODAL by default: Kimi sees the actual keyframes AND the auto-generated facts,
     with the frames declared ground-truth — so it self-corrects grounding errors (the
@@ -376,7 +379,14 @@ async def style_via_fireworks_fallback(
         f"- {s}: {RUBRICS[s]}\n  Example of the register (do NOT copy content): {EXEMPLARS[s]}"
         for s in styles
     )
-    shape = "{" + ", ".join('"{}": "..."'.format(s) for s in styles) + "}"
+    if n > 1:
+        slot = ", ".join(['"..."'] * n)
+        shape = "{" + ", ".join(f'"{s}": [{slot}]' for s in styles) + "}"
+        n_clause = (f" Write {n} candidate captions per style taking clearly DIFFERENT comedic/"
+                    "framing angles (both must still be accurate to the frames).")
+    else:
+        shape = "{" + ", ".join('"{}": "..."'.format(s) for s in styles) + "}"
+        n_clause = ""
     have_facts = bool(facts.subjects or facts.setting or facts.actions
                       or facts.audio_summary or facts.on_screen_text)
     use_frames = bool(frames)
@@ -398,15 +408,18 @@ async def style_via_fireworks_fallback(
         "Silently draft 2 angles per style, keep only the sharper one. Make each caption SPECIFIC "
         "to this video (name its actual subjects/actions, not generic filler), and make the four "
         "styles clearly distinct from each other. "
+        "CRITICAL for the humorous/sarcastic styles: the joke must come from the REAL visible "
+        "situation — never invent gestures, micro-events, sounds, or outcomes that are not clearly "
+        "shown. A reader must still learn exactly what the video shows (subject + action + setting). "
         f"Return STRICT JSON only (no markdown fences): {shape}"
     )
     facts_line = f"Preliminary FACTS (hint, may be wrong): {_facts_str(facts)}\n\n" if have_facts else ""
+    ask = f"Write {n} caption(s) per style.{n_clause} STRICT JSON now."
     if use_frames:
         parts: List[Dict] = [{
             "type": "text",
             "text": (f"{facts_line}Look at these ordered keyframes and identify what is really shown, "
-                     f"then write captions.\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n"
-                     "Write 1 caption per style. STRICT JSON now."),
+                     f"then write captions.\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n{ask}"),
         }]
         for f in frames[: config.KIMI_STYLE_FRAMES]:
             parts.append({"type": "image_url",
@@ -414,14 +427,13 @@ async def style_via_fireworks_fallback(
         user_content: object = parts
     else:
         user_content = (
-            f"FACTS: {_facts_str(facts)}\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n"
-            "Write 1 caption per style. STRICT JSON now."
+            f"FACTS: {_facts_str(facts)}\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n{ask}"
         )
 
-    async def one_call(temp: float) -> Dict[str, str]:
+    async def one_call(temp: float) -> Dict[str, List[str]]:
         payload = {
             "model": config.TEXT_FALLBACK_MODEL,
-            "max_tokens": 700,
+            "max_tokens": 700 if n == 1 else 1400,
             "temperature": temp,
             "reasoning_effort": "none",
             "messages": [
@@ -434,25 +446,37 @@ async def style_via_fireworks_fallback(
             timeout=timeout, retries=1,
         )
         lowered = _norm_style_dict(extract_json(message_content(resp)) or {}, styles)
-        out = {}
+        out: Dict[str, List[str]] = {}
         for s in styles:
             v = lowered.get(s)
+            if isinstance(v, (str, int, float)):
+                v = [v]
             if isinstance(v, list):
-                v = v[0] if v else ""
-            if isinstance(v, (str, int, float)) and str(v).strip():
-                out[s] = str(v).strip()
+                cands = [str(c).strip() for c in v if str(c).strip()]
+                if cands:
+                    out[s] = cands
         return out
 
-    result = await one_call(0.6)
+    result = await one_call(temperature)
     if len(result) < len(styles):
         log.warning("kimi styling returned %d/%d styles — retrying once", len(result), len(styles))
         try:
-            retry = await one_call(0.4)
+            retry = await one_call(max(0.3, temperature - 0.2))
             if len(retry) > len(result):
                 result = retry
         except Exception as e:
             log.warning("kimi styling retry failed: %s", str(e)[:120])
     return result
+
+
+async def style_via_fireworks_fallback(
+    client: httpx.AsyncClient, facts: GroundedFacts, styles: List[str], timeout: float,
+    frames: Optional[List[Dict]] = None, temperature: float = 0.6,
+) -> Dict[str, str]:
+    """Single-candidate wrapper around kimi_style_sets."""
+    sets = await kimi_style_sets(client, facts, styles, timeout,
+                                 frames=frames, temperature=temperature, n=1)
+    return {s: c[0] for s, c in sets.items() if c}
 
 
 def _short_scene(facts: GroundedFacts) -> str:
@@ -471,6 +495,72 @@ def _short_scene(facts: GroundedFacts) -> str:
         core = f"{core} in {setting}"
     # Hard cap the whole phrase
     return " ".join(core.split()[:12]).strip()
+
+
+async def pick_from_pools(
+    client: httpx.AsyncClient, frames: Optional[List[Dict]],
+    pools: Dict[str, List[str]], styles: List[str], timeout: float,
+) -> Dict[str, str]:
+    """Frame-grounded verifier: for each style, pick the best of 2-3 candidate
+    captions on the two judged axes (accuracy to the frames + style match). One fast
+    Kimi call; on any failure returns each pool's first candidate."""
+    fallback = {s: pools[s][0] for s in styles if pools.get(s)}
+    if not any(len(pools.get(s, [])) > 1 for s in styles):
+        return fallback
+    numbered = {}
+    orders: Dict[str, List[int]] = {}
+    for s in styles:
+        cands = pools.get(s, [])
+        idx = list(range(len(cands)))
+        random.shuffle(idx)  # suppress position bias
+        orders[s] = idx
+        numbered[s] = {str(i + 1): cands[j] for i, j in enumerate(idx)}
+    shape = "{" + ", ".join(f'"{s}": "<number>"' for s in styles) + "}"
+    parts: List[Dict] = [{
+        "type": "text",
+        "text": (
+            "You judge video captions. For EACH style below, compare its numbered candidate "
+            "captions and pick the number whose caption is (1) most faithful to what the "
+            "keyframes actually show — no invented objects/events — and (2) best matches the "
+            "style register. Judge each style independently.\n"
+            f"STYLE RUBRICS: {json.dumps({s: RUBRICS[s] for s in styles})}\n"
+            f"CANDIDATES: {json.dumps(numbered, ensure_ascii=False)}\n"
+            f"Return STRICT JSON only: {shape}"
+        ),
+    }]
+    for f in (frames or [])[:4]:
+        parts.append({"type": "image_url",
+                      "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
+    payload = {
+        "model": config.TEXT_FALLBACK_MODEL,
+        "max_tokens": 200,
+        "temperature": 0.0,
+        "reasoning_effort": "none",
+        "messages": [{"role": "user", "content": parts}],
+    }
+    try:
+        resp = await chat_completion(
+            client, config.FIREWORKS_BASE, config.FIREWORKS_API_KEY, payload,
+            timeout=timeout, retries=0,
+        )
+        data = extract_json(message_content(resp)) or {}
+        out = {}
+        picks = []
+        for s in styles:
+            cands = pools.get(s, [])
+            choice = str(data.get(s, "")).strip()
+            try:
+                j = orders[s][int(choice) - 1]
+                out[s] = cands[j]
+            except (ValueError, IndexError, KeyError):
+                out[s] = fallback.get(s, "")
+            picks.append(choice or "?")
+        if all(out.get(s) for s in styles):
+            log.info("verifier picks per style: %s", "".join(picks))
+            return out
+    except Exception as e:
+        log.warning("verifier failed, first candidates stand: %s", str(e)[:120])
+    return fallback
 
 
 def degraded_captions(facts: GroundedFacts, styles: List[str], duration: float) -> Dict[str, str]:

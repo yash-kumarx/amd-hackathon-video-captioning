@@ -99,7 +99,7 @@ AUDIO_MAX_SEC = float(os.environ.get("AUDIO_MAX_SEC", "90"))
 STYLE_GRACE = float(os.environ.get("STYLE_GRACE", "12"))
 KIMI_STYLE_TIMEOUT = float(os.environ.get("KIMI_STYLE_TIMEOUT", "8"))
 # Kimi styles multimodally (sees keyframes + facts-hint) → self-corrects grounding errors.
-KIMI_STYLE_FRAMES = int(os.environ.get("KIMI_STYLE_FRAMES", "5"))
+KIMI_STYLE_FRAMES = int(os.environ.get("KIMI_STYLE_FRAMES", "6"))
 BACKUP_RESERVE = float(os.environ.get("BACKUP_RESERVE", "9"))     # time reserved for the Kimi lane
 GEMMA_MIN_GRACE = float(os.environ.get("GEMMA_MIN_GRACE", "5"))   # below this, don't even try Gemma
 JUDGE_TIMEOUT = float(os.environ.get("JUDGE_TIMEOUT", "8"))

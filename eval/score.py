@@ -36,20 +36,20 @@ RUBRICS = {
     "humorous_non_tech": "Warm, everyday relatable humor, witty-friend narration, zero tech jargon.",
 }
 
-JUDGE_PROMPT = """You are an exacting video-caption judge. You see keyframes from a video and four captions, each targeting a labeled style.
+# Mirrors the REAL Track 2 rubric (Participant Guide): exactly two axes.
+JUDGE_PROMPT = """You are the automated judge for a video-captioning contest. You see keyframes from a video and four captions, each targeting a labeled style.
 
-Score EVERY caption on three axes, each 0.0-1.0:
-- accuracy: every claim is visibly true or plausible for this video; hallucinated objects/events/brands = heavy penalty
-- style: how perfectly it embodies its target style register (rubrics below)
-- quality: fluency, specificity to THIS video (generic filler scores low), wit/engagement appropriate to the style
+Score EVERY caption on exactly two axes, each 0.0-1.0:
+- accuracy: how faithfully the caption reflects the video content (hallucinated subjects/objects/events = heavy penalty; vague-but-true is mid; specific and true is high)
+- style: how well the caption matches the requested tone (rubrics below)
 
-Be strict: reserve >0.85 for genuinely excellent captions. A bland but correct caption is ~0.5 quality.
+Be strict: reserve >0.9 for captions that are both specific and flawless in register.
 STYLE RUBRICS: %s
 
 CAPTIONS: %s
 
 Return STRICT JSON only:
-{"formal": {"accuracy": x, "style": x, "quality": x}, "sarcastic": {...}, "humorous_tech": {...}, "humorous_non_tech": {...}}"""
+{"formal": {"accuracy": x, "style": x}, "sarcastic": {...}, "humorous_tech": {...}, "humorous_non_tech": {...}}"""
 
 
 def sh(cmd: list) -> str:
@@ -153,7 +153,7 @@ async def score_clip(client, task_id, url, captions):
     )
     per_style = {}
     for s in STYLES:
-        axes = {"accuracy": [], "style": [], "quality": []}
+        axes = {"accuracy": [], "style": []}
         for j in judges:
             if isinstance(j, dict) and isinstance(j.get(s), dict):
                 for a in axes:
@@ -162,10 +162,10 @@ async def score_clip(client, task_id, url, captions):
                         axes[a].append(max(0.0, min(1.0, float(v))))
         if all(axes.values()):
             m = {a: sum(v) / len(v) for a, v in axes.items()}
-            m["overall"] = sum(m.values()) / 3
+            m["overall"] = sum(m.values()) / 2
             per_style[s] = m
         else:
-            per_style[s] = {"accuracy": None, "style": None, "quality": None, "overall": None}
+            per_style[s] = {"accuracy": None, "style": None, "overall": None}
     errs = [str(j)[:100] for j in judges if not isinstance(j, dict)]
     return per_style, errs
 
@@ -200,7 +200,7 @@ async def main():
            "n": len(scores),
            "min": round(min(scores), 3) if scores else None,
            "max": round(max(scores), 3) if scores else None}
-    for axis in ("accuracy", "style", "quality"):
+    for axis in ("accuracy", "style"):
         vals = [st[axis] for c in out["clips"].values() for st in c["styles"].values()
                 if st[axis] is not None]
         agg[axis] = round(sum(vals) / len(vals), 4) if vals else None
@@ -215,7 +215,7 @@ async def main():
     path = os.path.join(HERE, f"scores_{args.tag}.json")
     json.dump(out, open(path, "w"), indent=1, ensure_ascii=False)
     print(f"\n== {args.tag} == mean={agg['mean']} accuracy={agg['accuracy']} "
-          f"style={agg['style']} quality={agg['quality']}\nper-style: {per_style_mean}"
+          f"style={agg['style']}\nper-style: {per_style_mean}"
           f"\n({time.time()-t0:.0f}s) -> {path}")
 
 
