@@ -45,10 +45,10 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                        bank=None) -> Dict[str, str]:
     """Full pipeline for one clip; every stage degrades rather than raises.
 
-    Latency plan (28s wall): extraction ≤4s → grounding ∥ transcription ∥ OCR ≤9s
-    → Gemma styling (measured ~17.5s; thinking unstrippable) raced against the
-    deadline with a fast Kimi backup — whichever valid result exists at the wire
-    wins, Gemma preferred.
+    Speed-first plan (≤25s wall on a 1-2 vCPU runner): NO full download — ffmpeg
+    range-requests frames/audio straight from the URL (~1-3MB per grab instead of a
+    10-90MB file). Grounding ∥ transcription ≤9s → Gemma races a banked multimodal
+    Kimi result; whichever valid result exists at the wire wins, Gemma preferred.
     """
     sw = Stopwatch(config.CLIP_DEADLINE)
     workdir = os.path.join(config.WORK_DIR, task.task_id)
@@ -59,9 +59,15 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
     duration = 0.0
     transcript: Optional[str] = None
     try:
-        # --- Stage 0-1: download, probe, frames ---
+        # --- Stage 0-1: download (network-bound, CPU-cheap), then probe + frames.
+        # If the download fails, ffmpeg range-requests the URL directly as a fallback.
         video = os.path.join(workdir, "video.mp4")
-        await extract.download_video(client, task.video_url, video)
+        try:
+            await extract.download_video(client, task.video_url, video)
+        except Exception as de:
+            log.warning("[%s] download failed (%s) — streaming frames from URL",
+                        task.task_id, errstr(de))
+            video = task.video_url
         meta = await extract.probe(video)
         duration = meta["duration"]
         frames = await extract.extract_frames(video, workdir, duration)

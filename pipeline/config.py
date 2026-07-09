@@ -60,7 +60,7 @@ FRAME_JPEG_Q = int(os.environ.get("FRAME_JPEG_Q", "5"))  # ffmpeg -q:v scale (2.
 
 # --- Concurrency & budgets (seconds) ---
 GLOBAL_BUDGET = float(os.environ.get("GLOBAL_BUDGET", "540"))
-CLIP_CONCURRENCY = int(os.environ.get("CLIP_CONCURRENCY", "4"))
+CLIP_CONCURRENCY = int(os.environ.get("CLIP_CONCURRENCY", "3"))  # CPU-starved runners
 # Gemini free tier 500s on ANY concurrent Gemma calls (verified live) → serialize + gap
 GEMMA_CONCURRENCY = int(os.environ.get("GEMMA_CONCURRENCY", "1"))
 GEMMA_MIN_GAP = float(os.environ.get("GEMMA_MIN_GAP", "0.8"))
@@ -68,7 +68,9 @@ GEMMA_MIN_GAP = float(os.environ.get("GEMMA_MIN_GAP", "0.8"))
 # per-request window. run() shrinks it further for large task counts.
 CLIP_STAGGER = float(os.environ.get("CLIP_STAGGER", "8"))
 CLIP_DEADLINE = float(os.environ.get("CLIP_DEADLINE", "25"))
-DOWNLOAD_TIMEOUT = float(os.environ.get("DOWNLOAD_TIMEOUT", "12"))
+# Tight: on timeout the pipeline STREAMS frames from the URL instead (ranged reads),
+# which beats waiting on a 90MB file over a slow pipe.
+DOWNLOAD_TIMEOUT = float(os.environ.get("DOWNLOAD_TIMEOUT", "8"))
 GROUNDING_TIMEOUT = float(os.environ.get("GROUNDING_TIMEOUT", "7"))
 AUDIO_TIMEOUT = float(os.environ.get("AUDIO_TIMEOUT", "8"))
 AUDIO_MAX_SEC = float(os.environ.get("AUDIO_MAX_SEC", "90"))
