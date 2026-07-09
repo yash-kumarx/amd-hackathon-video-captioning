@@ -1,0 +1,5 @@
+[
+ {"task_id": "smoke_1860079", "video_url": "https://storage.googleapis.com/amd-hackathon-clips/1860079-hd_1920_1080_24fps.mp4", "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]},
+ {"task_id": "smoke_31948459", "video_url": "https://storage.googleapis.com/amd-hackathon-clips/31948459-hd_1920_1080_24fps.mp4", "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]},
+ {"task_id": "smoke_12122308", "video_url": "https://storage.googleapis.com/amd-hackathon-clips/12122308-hd_1920_1080_30fps.mp4", "styles": ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]}
+]

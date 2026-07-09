@@ -15,15 +15,29 @@ from . import config
 log = logging.getLogger("pipeline.extract")
 
 
+# Some hosts (e.g. Wikimedia) 403 requests without a real User-Agent
+_UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
+
+
 async def download_video(client: httpx.AsyncClient, url: str, dest: str) -> str:
     tmp = dest + ".part"
-    async with client.stream("GET", url, timeout=config.DOWNLOAD_TIMEOUT, follow_redirects=True) as r:
-        r.raise_for_status()
-        with open(tmp, "wb") as f:
-            async for chunk in r.aiter_bytes(1 << 20):
-                f.write(chunk)
-    os.replace(tmp, dest)
-    return dest
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            async with client.stream("GET", url, timeout=config.DOWNLOAD_TIMEOUT,
+                                     follow_redirects=True, headers=_UA) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    async for chunk in r.aiter_bytes(1 << 20):
+                        f.write(chunk)
+            os.replace(tmp, dest)
+            return dest
+        except Exception as e:
+            last_exc = e
+            if attempt == 0:
+                log.warning("download attempt 1 failed (%s) — retrying", str(e)[:100])
+                await asyncio.sleep(0.5)
+    raise last_exc if last_exc else RuntimeError("download failed")
 
 
 async def _run(cmd: List[str], timeout: float) -> Tuple[int, bytes, bytes]:
@@ -103,6 +117,7 @@ async def extract_audio(path: str, out_dir: str) -> Optional[str]:
     wav = os.path.join(out_dir, "audio.wav")
     code, _, err = await _run(
         ["ffmpeg", "-y", "-loglevel", "error", "-i", path, "-vn",
+         "-t", str(config.AUDIO_MAX_SEC),
          "-ac", "1", "-ar", "16000", "-f", "wav", wav],
         timeout=15,
     )

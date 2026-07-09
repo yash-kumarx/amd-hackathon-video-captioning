@@ -1,0 +1,122 @@
+[
+ {
+  "task_id": "eval_sports",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/f/f3/Day_3_%28July_2%29_Highlights_of_Team_Navy_at_DoD_Warrior_Games.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_food_cooking",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/d/d9/How_to_make_pasta_sauce.ogv",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_technology",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/e/e6/The_evolution_of_the_desk_by_the_harvard_innovation_lab.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_music_performance",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/b/ba/Imitaci%C3%B3_per_arsin_et_thesin_-_contrapunctus_II_%28BWV_1080%29.ogv",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_people_talking",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/e/ef/-3_O_Levezinho_encontra_o_amigo.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_vehicles",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/b/bf/Bahn%C3%BCberf%C3%BChrung_Zeitraffer_-_Train_Overpass_Timelapse_%28Royalty_Free%29_%28Kostenlos%29_2880x1620p_24FPS.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_animals_other",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/b/ba/The_Sick_Kitten_%281903%29.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_nature_wildlife",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/c/c4/Wuppertal_-_Zoo_im_Winter1415_-_Panthera_leo_04_ies.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_urban_street",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/0/0e/OpenAI_Sora_in_Action-_Tokyo_Walk.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_water_boats",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/c/c3/B-Roll_edit_-_USCGC_Eagle_and_NS_Mircea_departing_New_York.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_aerial_drone",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Aerial_view_of_sand_beach._Top_view_sea_waves._Drone_footage.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "eval_crafts_hands",
+  "video_url": "https://upload.wikimedia.org/wikipedia/commons/c/ce/Knitting_demo_of_two_stitches.webm",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ }
+]

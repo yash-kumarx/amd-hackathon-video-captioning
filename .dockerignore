@@ -8,3 +8,6 @@ __pycache__/
 STATUS.md
 RESEARCH.md
 CLAUDE.md
+eval/
+container_io/
+README.md

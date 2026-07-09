@@ -8,3 +8,9 @@ container_io/
 CLAUDE.md
 RESEARCH.md
 STATUS.md
+eval/clips/
+eval/frames/
+eval/out_*/
+eval/scores_*.json
+eval/wm_fetch.log
+pipeline/.idea/

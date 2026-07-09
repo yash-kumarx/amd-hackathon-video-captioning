@@ -23,7 +23,13 @@ SYSTEM = (
     "Report ONLY what is visually or audibly verifiable. Never invent brand names, numbers, or dialogue. "
     "Describe the depicted scene itself — do NOT comment on encoding, playback speed, filters, "
     "camera pans, or missing audio (such observations belong in uncertainty_notes if essential). "
-    "If unsure, put it in uncertainty_notes. Be concrete: colors, counts, actions, location cues, motion over time. "
+    "If unsure, put it in uncertainty_notes. For ambiguous close-ups prefer the most common everyday "
+    "interpretation (e.g. keyboard keys, not staples) and list alternatives in uncertainty_notes. "
+    "Only state a mood if it is plainly evident on screen; otherwise leave mood empty. "
+    "MOTION: compare consecutive keyframes before writing actions — note what moves and how "
+    "(subject position/posture changes, approaching or receding, camera motion). Never call a "
+    "subject stationary unless it truly holds the same pose and position across the frames. "
+    "Be concrete: colors, counts, actions, location cues, motion over time. "
     "Be terse. Output STRICT JSON only, no markdown fences, exactly this shape: "
     '{{"subjects": [], "actions": [], "setting": "", "on_screen_text": [], "mood": "", '
     '"audio_summary": "", "temporal_arc": "", "salient_objects": [], "uncertainty_notes": []}}'

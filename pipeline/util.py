@@ -137,10 +137,19 @@ def extract_json(text: str) -> Optional[Any]:
 
 
 def clamp_words(text: str, max_words: int) -> str:
+    """Cut overlong text at a sentence boundary when one exists reasonably deep in,
+    so judges never see a mid-thought amputation ("Spoiler: it.")."""
     words = text.split()
     if len(words) <= max_words:
         return text
-    out = " ".join(words[:max_words]).rstrip(",;: ")
+    prefix = " ".join(words[:max_words])
+    ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", prefix)]
+    if ends:
+        candidate = prefix[: ends[-1]].strip()
+        # Only accept the sentence cut if it keeps a substantial caption
+        if len(candidate.split()) >= max(8, int(max_words * 0.5)):
+            return candidate
+    out = prefix.rstrip(",;:— ")
     if not out.endswith((".", "!", "?")):
         out += "."
     return out

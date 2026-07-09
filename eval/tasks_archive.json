@@ -1,0 +1,62 @@
+[
+ {
+  "task_id": "arch_cooking",
+  "video_url": "https://archive.org/download/LuckyPeachTVVideoArchive/LuckyPeachYouTube/5%20Things%20You%20Didn%27t%20Know%20About%20Avocados/5%20Things%20You%20Didn%27t%20Know%20About%20Avocados%20%28720p_30fps_H264-192kbit_AAC%29.mp4",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "arch_sports",
+  "video_url": "https://archive.org/download/quranarabicenglishmp4/001-AlFatihah-The-Opening-English-Mishary-AlAfasy.mp4",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "arch_nature",
+  "video_url": "https://archive.org/download/WildlifeSampleVideo/Wildlife.mp4",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "arch_trains",
+  "video_url": "https://archive.org/download/thomas-and-the-magic-railroad-the-lost-edition/TATMR_FAN_EDIT3.mp4",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "arch_science",
+  "video_url": "https://archive.org/download/5PillarsOfIslamShahadahBecomingAMuslimAbuHafsah/186PeopleConvertToIslamIn1Day.mp4",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ },
+ {
+  "task_id": "arch_aviation",
+  "video_url": "https://archive.org/download/SF145/SF145_512kb.mp4",
+  "styles": [
+   "formal",
+   "sarcastic",
+   "humorous_tech",
+   "humorous_non_tech"
+  ]
+ }
+]

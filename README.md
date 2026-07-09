@@ -25,11 +25,20 @@ Gemma owns the entire language side of the pipeline:
    contradictions, style compliance, length band, and English-only, repairing inline.
 
 Gemma-4 is natively **multimodal** on this endpoint (verified by probe: it correctly described
-video keyframes) — the critique pass can be pointed at raw frames for visual verification.
+video keyframes) — when vision grounding fails entirely, Gemma grounds AND styles from raw
+keyframes itself (rescue mode), so even the degraded path stays Gemma.
 
-If Gemma cannot answer within the clip's latency budget (free-tier capacity is variable), a
-backup lane produces captions so no clip ever fails — but Gemma is always attempted first,
-and every fallback is logged loudly (`styled_by=` in the run log tells the truth per clip).
+**Multi-pool Gemma.** The Gemini free tier's latency swings widely by time of day (measured
+~7s calm / 36s+ congested). The pipeline therefore supports multiple Gemma capacity pools:
+a second Gemini project key (`GEMINI_API_KEY_2`) adds an independent serial lane, and an
+OpenRouter key (`OPENROUTER_API_KEY`) chains `google/gemma-4-31b-it:free` — the same Gemma,
+different pool — with the primary attempt capped so a congested Gemini call leaves time for
+the next pool to answer inside the clip budget.
+
+If Gemma still cannot answer in time, a backup racer (Kimi K2.6, running quietly in parallel
+from styling start) has captions banked so no clip ever fails — but Gemma is preferred at the
+wire whenever it lands (it reclaims the race even after its grace expires), and every fallback
+is logged loudly (`styled_by=` in the run log tells the truth per clip).
 
 ## Architecture
 
@@ -56,12 +65,13 @@ tasks.json → per clip (staggered, pipelined):
 ### Reliability engineering (why this never zeros a clip)
 - `results.json` is **pre-filled valid** at startup and atomically rewritten per clip — a hard
   kill still leaves a complete, schema-valid file with all four styles non-empty.
-- Per-clip hard deadline ≈27s (<30s contract) with stage-level budgets; clips are staggered so
-  the serialized Gemma lane (Gemini free tier rejects concurrent calls — verified) is free
-  exactly when each clip reaches styling.
-- Every stage degrades: grounding races two vision models; styling races Gemma against a
-  Kimi backup; the last rung templates captions from whatever facts exist. English-only and
-  length checks run in the final gate.
+- Per-clip budget ≈48s inside the 10-minute batch contract, with adaptive staggering that
+  shrinks for large task counts (total wall time stays under `GLOBAL_BUDGET`=540s) and keeps
+  the serialized Gemma lane free right when each clip reaches styling.
+- Every stage degrades: downloads retry with a browser UA; grounding races two vision models;
+  styling races Gemma (multi-pool) against a parallel Kimi backup; the last rung templates
+  captions from whatever facts exist. English-only, sentence-safe length clamping, and
+  non-empty checks run in the final gate.
 
 ## Running
 

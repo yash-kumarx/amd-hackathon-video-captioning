@@ -115,7 +115,11 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
     except Exception as e:
         log.warning("[%s] extraction/grounding degraded: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
 
-    # --- Stages 3-5: Gemma styling, raced against the clip deadline ---
+    # --- Stages 3-5: Gemma styling with a Kimi racer banked in parallel ---
+    # Both lanes start together: Gemma (serial free-tier lane, preferred) and a quiet
+    # Kimi backup (Fireworks, ~5-8s, pennies). Gemma gets nearly ALL residual time —
+    # if it lands anywhere inside the budget it wins; otherwise the banked Kimi result
+    # is already waiting. No sequential grace-then-backup dead time.
     captions: Dict[str, str] = {}
     styled_by = "ladder"
     gemma_task: Optional[asyncio.Task] = None
@@ -124,38 +128,45 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
         n = config.BEST_OF_N
         gemma_started = asyncio.Event()
         gemma_task = asyncio.ensure_future(
-            style.generate_candidates(client, facts, styles, n, timeout=25.0,
-                                      started=gemma_started)
+            style.generate_candidates(client, facts, styles, n,
+                                      timeout=config.STYLE_GRACE + 6,
+                                      started=gemma_started, frames=frames)
+        )
+        kimi_task = asyncio.ensure_future(
+            style.style_via_fireworks_fallback(
+                client, facts, styles,
+                min(config.KIMI_STYLE_TIMEOUT, max(4.0, sw.remaining - 2)),
+                frames=frames)
         )
         cands: Dict[str, List[str]] = {}
-        # Wait for the serial Gemma lane; if it doesn't free up while a full Gemma
-        # round (~12s) still fits in the budget, skip straight to the Kimi lane.
-        lane_wait = max(0.1, sw.remaining - 13.0)
+        # Wait for the serial Gemma lane up to the point where a minimal Gemma round
+        # could still finish before the wire; past that, Gemma can't win anyway.
+        lane_wait = max(0.1, sw.remaining - (config.GEMMA_MIN_GRACE + 2.5))
         got_lane = True
         try:
             await asyncio.wait_for(gemma_started.wait(), timeout=lane_wait)
         except asyncio.TimeoutError:
             got_lane = False
-            log.warning("[%s] gemma lane busy for %.1fs — going straight to Kimi",
+            log.warning("[%s] gemma lane busy for %.1fs — settling for Kimi racer",
                         task.task_id, lane_wait)
         if got_lane:
-            # Grace is timed from the actual HTTP start, reserving the backup lane's share.
-            # If the leftover grace can't fit a realistic Gemma round, don't burn it —
-            # hand the full window to Kimi instead.
-            grace = min(config.STYLE_GRACE, max(0.0, sw.remaining - config.BACKUP_RESERVE))
-            if grace < config.GEMMA_MIN_GRACE:
-                got_lane = False
-                gemma_task.cancel()
-                log.warning("[%s] only %.1fs grace available — skipping gemma, going straight to Kimi",
-                            task.task_id, grace)
-            else:
+            # Timed from the actual HTTP start; leave ~2.5s to collect the banked
+            # Kimi result and sanitize. Judge/critique get their cut only if enabled.
+            reserve = 2.5
+            if config.ENABLE_JUDGE and n > 1:
+                reserve += config.JUDGE_TIMEOUT
+            if config.ENABLE_CRITIQUE:
+                reserve += config.CRITIQUE_TIMEOUT
+            grace = min(config.STYLE_GRACE, max(0.0, sw.remaining - reserve))
+            if grace >= config.GEMMA_MIN_GRACE:
                 try:
                     cands = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=grace)
                 except asyncio.TimeoutError:
-                    log.warning("[%s] gemma not done after %.1fs grace — starting Kimi backup racer",
-                                task.task_id, grace)
+                    log.warning("[%s] gemma not done after %.1fs grace", task.task_id, grace)
                 except Exception as e:
                     log.warning("[%s] gemma styling failed: %s", task.task_id, errstr(e))
+            else:
+                log.warning("[%s] only %.1fs grace — Kimi racer stands", task.task_id, grace)
 
         if cands:
             winners = {s: c[0] for s, c in cands.items()}
@@ -168,15 +179,10 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
             log.info("[%s] gemma styled %d/%d styles (t=%.1fs)",
                      task.task_id, len(captions), len(styles), sw.elapsed)
         else:
-            # Kimi backup racer; Gemma keeps running and reclaims the win if it lands in time
-            kimi_task = asyncio.ensure_future(
-                style.style_via_fireworks_fallback(
-                    client, facts, styles,
-                    min(config.KIMI_STYLE_TIMEOUT, max(4.0, sw.remaining - 2)),
-                    frames=frames)
-            )
-            gemma_extra = max(0.3, sw.remaining - 5.0) if got_lane else 0.0
-            if gemma_extra > 0:
+            # Last residual chance for Gemma (it may still be mid-flight), then the
+            # banked Kimi result. Kimi started at styling-start, so it's long done.
+            gemma_extra = max(0.3, sw.remaining - 2.5) if got_lane and not gemma_task.done() else 0.0
+            if gemma_extra > 0.3:
                 try:
                     cands = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=gemma_extra)
                     captions = {s: c[0] for s, c in cands.items()}
@@ -185,15 +191,14 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
                 except (asyncio.TimeoutError, Exception):
                     pass
             if not captions:
-                # Gemma lost for good on this clip — free the serial lane immediately
                 if not gemma_task.done():
-                    gemma_task.cancel()
+                    gemma_task.cancel()  # free the serial lane for the next clip
                 try:
                     captions = await asyncio.wait_for(
-                        asyncio.shield(kimi_task), timeout=max(0.5, sw.remaining - 0.5))
+                        asyncio.shield(kimi_task), timeout=max(0.5, sw.remaining - 0.3))
                     styled_by = "kimi-backup"
-                    log.info("[%s] kimi backup styled %d styles (t=%.1fs)",
-                             task.task_id, len(captions), sw.elapsed)
+                    log.warning("[%s] GEMMA MISSED — kimi backup styled %d styles (t=%.1fs)",
+                                task.task_id, len(captions), sw.elapsed)
                 except Exception as e2:
                     log.warning("[%s] kimi backup failed too: %s", task.task_id, errstr(e2))
     except Exception as e:
@@ -236,13 +241,24 @@ async def run() -> int:
     style.init_concurrency()
     limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
 
+    # Adaptive stagger: shrink if the task count would push total wall time past
+    # GLOBAL_BUDGET (stagger×(n-1) + deadline + startup margin ≤ budget).
+    n_tasks = len(tasks)
+    stagger = config.CLIP_STAGGER
+    if n_tasks > 1:
+        max_stagger = (config.GLOBAL_BUDGET - config.CLIP_DEADLINE - 25) / (n_tasks - 1)
+        stagger = max(4.0, min(stagger, max_stagger))
+    log.info("plan: %d clips, stagger=%.1fs, deadline=%.0fs, est wall=%.0fs",
+             n_tasks, stagger, config.CLIP_DEADLINE,
+             stagger * max(0, n_tasks - 1) + config.CLIP_DEADLINE)
+
     async with httpx.AsyncClient(limits=limits) as client:
         async def worker(task: Task, index: int) -> None:
-            # Stagger starts to pipeline clips through the serial Gemma lane; a clip's
-            # 30s clock starts at ITS processing start, so waiting here costs nothing
-            # against the per-request budget (total runtime stays well under 10 min).
-            if index and config.CLIP_STAGGER > 0:
-                await asyncio.sleep(index * config.CLIP_STAGGER)
+            # Stagger starts to pipeline clips through the serial Gemma lane; the
+            # per-clip clock starts at ITS processing start, so waiting here costs
+            # nothing against the per-clip budget (total stays under GLOBAL_BUDGET).
+            if index and stagger > 0:
+                await asyncio.sleep(index * stagger)
             async with clip_sem:
                 try:
                     captions = await asyncio.wait_for(
