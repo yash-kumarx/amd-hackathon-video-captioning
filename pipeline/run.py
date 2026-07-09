@@ -168,7 +168,9 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
             else:
                 log.warning("[%s] only %.1fs grace — Kimi racer stands", task.task_id, grace)
 
-        if cands:
+        # Gemma is complete iff it produced all four styles; a partial Gemma result is
+        # topped up per-style from the banked Kimi floor rather than discarded.
+        if cands and len(cands) == len(styles):
             winners = {s: c[0] for s, c in cands.items()}
             if config.ENABLE_JUDGE and n > 1 and sw.remaining > config.JUDGE_TIMEOUT + 3:
                 winners = await style.judge_rerank(client, facts, cands, config.JUDGE_TIMEOUT)
@@ -176,31 +178,43 @@ async def process_clip(client: httpx.AsyncClient, task: Task) -> Dict[str, str]:
                 winners = await style.critique_repair(client, facts, winners, config.CRITIQUE_TIMEOUT)
             captions = winners
             styled_by = "gemma"
-            log.info("[%s] gemma styled %d/%d styles (t=%.1fs)",
-                     task.task_id, len(captions), len(styles), sw.elapsed)
+            log.info("[%s] gemma styled all %d styles (t=%.1fs)",
+                     task.task_id, len(styles), sw.elapsed)
         else:
-            # Last residual chance for Gemma (it may still be mid-flight), then the
-            # banked Kimi result. Kimi started at styling-start, so it's long done.
-            gemma_extra = max(0.3, sw.remaining - 2.5) if got_lane and not gemma_task.done() else 0.0
-            if gemma_extra > 0.3:
+            # Gemma didn't fully land. Give it a short residual chance if still mid-flight,
+            # then collect the banked Kimi floor (started at styling-start, generous timeout).
+            gemma_extra = max(0.0, sw.remaining - (config.KIMI_STYLE_TIMEOUT + 1.0)) \
+                if got_lane and not gemma_task.done() else 0.0
+            if gemma_extra > 1.0:
                 try:
-                    cands = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=gemma_extra)
-                    captions = {s: c[0] for s, c in cands.items()}
-                    styled_by = "gemma"
-                    log.info("[%s] gemma reclaimed the race (t=%.1fs)", task.task_id, sw.elapsed)
+                    late = await asyncio.wait_for(asyncio.shield(gemma_task), timeout=gemma_extra)
+                    if late and len(late) == len(styles):
+                        cands = late
+                        captions = {s: c[0] for s, c in late.items()}
+                        styled_by = "gemma"
+                        log.info("[%s] gemma reclaimed the race (t=%.1fs)", task.task_id, sw.elapsed)
                 except (asyncio.TimeoutError, Exception):
                     pass
             if not captions:
                 if not gemma_task.done():
                     gemma_task.cancel()  # free the serial lane for the next clip
+                kimi_res: Dict[str, str] = {}
                 try:
-                    captions = await asyncio.wait_for(
-                        asyncio.shield(kimi_task), timeout=max(0.5, sw.remaining - 0.3))
-                    styled_by = "kimi-backup"
-                    log.warning("[%s] GEMMA MISSED — kimi backup styled %d styles (t=%.1fs)",
-                                task.task_id, len(captions), sw.elapsed)
+                    kimi_res = await asyncio.wait_for(
+                        asyncio.shield(kimi_task), timeout=max(2.0, sw.remaining - 0.3))
                 except Exception as e2:
-                    log.warning("[%s] kimi backup failed too: %s", task.task_id, errstr(e2))
+                    log.warning("[%s] kimi styling failed: %s", task.task_id, errstr(e2))
+                # Merge: Kimi floor, topped up by any partial Gemma styles we did get
+                merged = dict(kimi_res)
+                for s, c in (cands or {}).items():
+                    if s not in merged and c:
+                        merged[s] = c[0]
+                if merged:
+                    captions = merged
+                    styled_by = "kimi-backup" if not cands else "gemma+kimi"
+                    lvl = log.warning if styled_by == "kimi-backup" else log.info
+                    lvl("[%s] GEMMA MISSED — styled via %s, %d/%d styles (t=%.1fs)",
+                        task.task_id, styled_by, len(captions), len(styles), sw.elapsed)
     except Exception as e:
         log.warning("[%s] styling stage error: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
     finally:

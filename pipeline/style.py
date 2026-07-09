@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 from typing import Dict, List, Optional
 
 import httpx
@@ -362,10 +363,15 @@ async def style_via_fireworks_fallback(
     client: httpx.AsyncClient, facts: GroundedFacts, styles: List[str], timeout: float,
     frames: Optional[List[Dict]] = None,
 ) -> Dict[str, str]:
-    """Backup racer for when Gemma misses its window (Gemini free-tier latency swings
-    from ~7s to 36s+ by time of day — measured). Runs quietly in parallel from styling
-    start; run.py logs loudly if this result is actually used. Same flagship prompt
-    quality as the Gemma lane: full rubrics + register exemplars + draft-and-pick."""
+    """Reliable styling lane on Kimi K2.6 (Fireworks). Runs in parallel with the Gemma
+    lane from styling start (Gemma preferred at the wire; this is the floor that means
+    no clip ever falls to the template ladder in a congested Gemini window).
+
+    MULTIMODAL by default: Kimi sees the actual keyframes AND the auto-generated facts,
+    with the frames declared ground-truth — so it self-corrects grounding errors (the
+    facts said "horse"; the frame shows a dog) instead of inheriting them. This lifts
+    the accuracy axis, which the facts-only handoff was capping. Retries once if the
+    first pass yields fewer than all four styles."""
     rubric_lines = "\n".join(
         f"- {s}: {RUBRICS[s]}\n  Example of the register (do NOT copy content): {EXEMPLARS[s]}"
         for s in styles
@@ -373,13 +379,19 @@ async def style_via_fireworks_fallback(
     shape = "{" + ", ".join('"{}": "..."'.format(s) for s in styles) + "}"
     have_facts = bool(facts.subjects or facts.setting or facts.actions
                       or facts.audio_summary or facts.on_screen_text)
-    if have_facts or not frames:
-        ground_clause = "in the provided FACTS json"
+    use_frames = bool(frames)
+    if use_frames and have_facts:
+        ground_clause = ("in what the keyframes actually show. Preliminary auto-generated FACTS are "
+                         "provided as a HINT only — they may misidentify subjects; TRUST THE FRAMES "
+                         "when they conflict")
+    elif use_frames:
+        ground_clause = "in what the keyframes actually show"
     else:
-        ground_clause = "in the provided keyframes"
+        ground_clause = "in the provided FACTS json"
     sys_txt = (
         f"You write video captions in requested styles. Every caption MUST be factually grounded "
-        f"{ground_clause} — do not add events, objects, brands, or claims not present there. "
+        f"{ground_clause} — do not add events, objects, brands, or claims that are not there. "
+        "Identify the main subject correctly before writing. "
         "Never mention missing audio, playback speed, or video/encoding artifacts. "
         f"English only. Each caption is 1-2 sentences, {config.WORD_MIN}-{config.WORD_MAX} words — "
         f"NEVER exceed {config.WORD_MAX} words, end every caption as a complete sentence. "
@@ -388,83 +400,123 @@ async def style_via_fireworks_fallback(
         "styles clearly distinct from each other. "
         f"Return STRICT JSON only (no markdown fences): {shape}"
     )
-    if have_facts or not frames:
-        user_content: object = (
+    facts_line = f"Preliminary FACTS (hint, may be wrong): {_facts_str(facts)}\n\n" if have_facts else ""
+    if use_frames:
+        parts: List[Dict] = [{
+            "type": "text",
+            "text": (f"{facts_line}Look at these ordered keyframes and identify what is really shown, "
+                     f"then write captions.\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n"
+                     "Write 1 caption per style. STRICT JSON now."),
+        }]
+        for f in frames[: config.KIMI_STYLE_FRAMES]:
+            parts.append({"type": "image_url",
+                          "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
+        user_content: object = parts
+    else:
+        user_content = (
             f"FACTS: {_facts_str(facts)}\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n"
             "Write 1 caption per style. STRICT JSON now."
         )
+
+    async def one_call(temp: float) -> Dict[str, str]:
+        payload = {
+            "model": config.TEXT_FALLBACK_MODEL,
+            "max_tokens": 700,
+            "temperature": temp,
+            "reasoning_effort": "none",
+            "messages": [
+                {"role": "system", "content": sys_txt},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        resp = await chat_completion(
+            client, config.FIREWORKS_BASE, config.FIREWORKS_API_KEY, payload,
+            timeout=timeout, retries=1,
+        )
+        lowered = _norm_style_dict(extract_json(message_content(resp)) or {}, styles)
+        out = {}
+        for s in styles:
+            v = lowered.get(s)
+            if isinstance(v, list):
+                v = v[0] if v else ""
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                out[s] = str(v).strip()
+        return out
+
+    result = await one_call(0.6)
+    if len(result) < len(styles):
+        log.warning("kimi styling returned %d/%d styles — retrying once", len(result), len(styles))
+        try:
+            retry = await one_call(0.4)
+            if len(retry) > len(result):
+                result = retry
+        except Exception as e:
+            log.warning("kimi styling retry failed: %s", str(e)[:120])
+    return result
+
+
+def _short_scene(facts: GroundedFacts) -> str:
+    """A SHORT (<=12 word) scene phrase from facts — never a facts dump, no duplication."""
+    subj = " ".join((facts.subjects[0] if facts.subjects else "").split()[:4]).strip()
+    act = " ".join((facts.actions[0] if facts.actions else "").split()[:6]).strip()
+    setting = " ".join((facts.setting or "").split()[:5]).strip()
+    subj_l, act_l = subj.lower(), act.lower()
+    # Avoid "pedestrians pedestrians crossing": if the action already names the subject,
+    # keep only the action; else combine.
+    if subj and act:
+        core = act if (subj_l and subj_l in act_l) else f"{subj} {act}"
     else:
-        parts: List[Dict] = [{
-            "type": "text",
-            "text": ("No pre-computed facts available. Look at these ordered keyframes from the video "
-                     f"and caption exactly what you see.\n\nSTYLE RUBRICS:\n{rubric_lines}\n\n"
-                     "Write 1 caption per style. STRICT JSON now."),
-        }]
-        for f in frames[:4]:
-            parts.append({"type": "image_url",
-                          "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
-        user_content = parts
-    payload = {
-        "model": config.TEXT_FALLBACK_MODEL,
-        "max_tokens": 700,
-        "temperature": 0.6,
-        "reasoning_effort": "none",
-        "messages": [
-            {"role": "system", "content": sys_txt},
-            {"role": "user", "content": user_content},
-        ],
-    }
-    resp = await chat_completion(
-        client, config.FIREWORKS_BASE, config.FIREWORKS_API_KEY, payload,
-        timeout=timeout, retries=1,
-    )
-    data = extract_json(message_content(resp)) or {}
-    lowered = _norm_style_dict(data, styles)
-    out = {}
-    for s in styles:
-        v = lowered.get(s)
-        if isinstance(v, list):
-            v = v[0] if v else ""
-        if isinstance(v, (str, int, float)) and str(v).strip():
-            out[s] = str(v).strip()
-    return out
+        core = subj or act or "a quiet scene"
+    if setting and setting.lower() not in core.lower():
+        core = f"{core} in {setting}"
+    # Hard cap the whole phrase
+    return " ".join(core.split()[:12]).strip()
 
 
 def degraded_captions(facts: GroundedFacts, styles: List[str], duration: float) -> Dict[str, str]:
-    """Deterministic last-rung ladder — always valid, always non-empty, style-differentiated.
-    Built ONLY from observed facts (no canned answers about content we didn't see)."""
-    bits = []
-    if facts.subjects:
-        bits.append(", ".join(facts.subjects[:3]))
-    if facts.actions:
-        bits.append(" and ".join(facts.actions[:2]))
-    if facts.setting:
-        bits.append(f"in {facts.setting}")
-    scene = " ".join(bits).strip() or "a short video scene"
-    dur = f"{duration:.0f}-second" if duration else "short"
+    """Deterministic last-rung ladder — always valid, non-empty, style-differentiated, and
+    SHORT/clean (never a facts dump). Built only from observed facts. This rung should almost
+    never ship (Gemma + Kimi lanes cover styling), but when it does it must not tank the score
+    with a run-on truncated blob — so each caption is a tidy single sentence."""
+    scene = _short_scene(facts)
+    a = scene[0].upper() + scene[1:] if scene else "A quiet scene"
     return {
-        "formal": clamp_words(
-            f"This {dur} clip documents {scene}, presented without narration and recorded in a single continuous take for review.",
-            config.WORD_MAX),
+        "formal": clamp_words(f"{a}, captured in a brief continuous shot.", config.WORD_MAX),
         "sarcastic": clamp_words(
-            f"Behold: {scene}. Roughly {max(duration,10):.0f} seconds of unfiltered cinema that absolutely nobody demanded, and yet here we all are, watching it anyway.",
-            config.WORD_MAX),
+            f"Ah yes, {scene} — riveting cinema that absolutely nobody saw coming.", config.WORD_MAX),
         "humorous_tech": clamp_words(
-            f"System log: {scene} loaded successfully, ran for {max(duration,10):.0f} seconds, and exited with code 0. No bugs reported, though QA remains suspicious.",
-            config.WORD_MAX),
+            f"{a}, running smoothly on a single thread with zero exceptions thrown.", config.WORD_MAX),
         "humorous_non_tech": clamp_words(
-            f"So basically, {scene} — for {max(duration,10):.0f} whole seconds. Honestly, it's the most commitment any of us has shown all week.",
-            config.WORD_MAX),
+            f"Just {scene}, and honestly it is doing its best out there.", config.WORD_MAX),
     }
 
 
+def _looks_degenerate(c: str) -> bool:
+    """A run-on facts-dump or heavily duplicated caption — reject in favor of the ladder."""
+    words = c.split()
+    if len(words) > config.WORD_MAX + 6 and not re.search(r"[.!?]", c[:_char_of_word(c, config.WORD_MAX)]):
+        return True  # long with no sentence break early = run-on
+    lw = [w.lower().strip(".,;:") for w in words if w.strip(".,;:")]
+    if len(lw) >= 12 and len(set(lw)) / len(lw) < 0.55:
+        return True  # low lexical variety = duplication ("pedestrians ... pedestrians ...")
+    return False
+
+
+def _char_of_word(text: str, n: int) -> int:
+    """Char index just past the n-th word (for slicing)."""
+    parts = text.split()
+    if len(parts) <= n:
+        return len(text)
+    return len(" ".join(parts[:n]))
+
+
 def sanitize(captions: Dict[str, str], facts: GroundedFacts, styles: List[str], duration: float) -> Dict[str, str]:
-    """Final gate: every requested style non-empty, English, within length cap."""
+    """Final gate: every requested style non-empty, English, sentence-clean, within length cap."""
     ladder = degraded_captions(facts, styles, duration)
     out = {}
     for s in styles:
         c = (captions.get(s) or "").strip()
-        if not c or not mostly_english(c):
+        if not c or not mostly_english(c) or _looks_degenerate(c):
             c = ladder[s]
-        out[s] = clamp_words(c, config.WORD_MAX + 8)  # hard cap with small slack over soft band
+        out[s] = clamp_words(c, config.WORD_MAX + 8)  # sentence-aware hard cap
     return out

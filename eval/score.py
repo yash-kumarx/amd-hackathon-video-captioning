@@ -101,6 +101,8 @@ def extract_json(text: str):
 
 
 _flash_sem = asyncio.Semaphore(1)  # gemini free tier 429s on concurrent judge calls
+_flash_last = [0.0]                 # global min-gap pacing for the gemini judge
+_FLASH_GAP = 4.0
 
 
 async def call_judge(client, base, key, model, frames_b64, captions, extra=None):
@@ -113,18 +115,23 @@ async def call_judge(client, base, key, model, frames_b64, captions, extra=None)
     if extra:
         payload.update(extra)
     serial = "generativelanguage" in base
-    for attempt in range(3):
+    import time as _t
+    for attempt in range(5):
         if serial:
             async with _flash_sem:
+                wait = _FLASH_GAP - (_t.monotonic() - _flash_last[0])
+                if wait > 0:
+                    await asyncio.sleep(wait)
                 r = await client.post(f"{base}/chat/completions",
                                       headers={"Authorization": f"Bearer {key}"},
                                       json=payload, timeout=90)
+                _flash_last[0] = _t.monotonic()
         else:
             r = await client.post(f"{base}/chat/completions",
                                   headers={"Authorization": f"Bearer {key}"},
                                   json=payload, timeout=90)
-        if r.status_code == 429 and attempt < 2:
-            await asyncio.sleep(8.0 * (attempt + 1))
+        if r.status_code == 429 and attempt < 4:
+            await asyncio.sleep(6.0 * (attempt + 1))
             continue
         r.raise_for_status()
         content = r.json()["choices"][0]["message"]["content"]
@@ -176,7 +183,7 @@ async def main():
     t0 = time.time()
     out = {"tag": args.tag, "results_file": args.results, "clips": {}, "aggregate": {}}
     async with httpx.AsyncClient() as client:
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(2)
 
         async def one(tid):
             async with sem:
