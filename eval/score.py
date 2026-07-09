@@ -148,7 +148,7 @@ async def score_clip(client, task_id, url, captions):
                    "accounts/fireworks/models/kimi-k2p6", frames, captions,
                    extra={"reasoning_effort": "none"}),
         call_judge(client, "https://generativelanguage.googleapis.com/v1beta/openai",
-                   gm_key, "gemini-2.5-flash", frames, captions),
+                   gm_key, os.environ.get("FLASH_JUDGE_MODEL", "gemini-2.5-flash"), frames, captions),
         return_exceptions=True,
     )
     per_style = {}

@@ -173,8 +173,11 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                         task.task_id, lane_wait)
         if got_lane:
             # Timed from the actual HTTP start; leave ~2.5s to collect the banked
-            # Kimi result and sanitize. Judge/critique get their cut only if enabled.
+            # Kimi result and sanitize — plus the flash-verify window when that lane
+            # is live (otherwise Gemma's grace starves the verifier every time).
             reserve = 2.5
+            if flash_task is not None:
+                reserve += 4.5
             if config.ENABLE_JUDGE and n > 1:
                 reserve += config.JUDGE_TIMEOUT
             if config.ENABLE_CRITIQUE:

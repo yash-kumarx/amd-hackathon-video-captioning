@@ -16,7 +16,7 @@ import httpx
 
 from . import config
 from .schemas import GroundedFacts
-from .util import (chat_completion, clamp_words, extract_json, message_content,
+from .util import (chat_completion, clamp_words, extract_json, gemini_chain_call, message_content,
                    mostly_english, strip_thought)
 
 log = logging.getLogger("pipeline.style")
@@ -523,7 +523,6 @@ async def flash_style_set(
         parts.append({"type": "image_url",
                       "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
     payload = {
-        "model": config.FLASH_STYLE_MODEL,
         "max_tokens": 900,
         "temperature": 0.7,
         "messages": [
@@ -537,10 +536,8 @@ async def flash_style_set(
         if gap > 0:
             await asyncio.sleep(gap)
         _flash_last[0] = _t.monotonic()
-        resp = await chat_completion(
-            client, config.GEMINI_OPENAI_BASE, config.GEMINI_API_KEY,
-            payload, timeout=timeout, retries=0, provider="gemini",
-        )
+        resp = await gemini_chain_call(client, payload, timeout,
+                                       config.flash_style_chain())
     lowered = _norm_style_dict(extract_json(strip_thought(message_content(resp))) or {}, styles)
     out = {}
     for s in styles:
@@ -605,28 +602,27 @@ async def pick_from_pools(
     for f in (frames or [])[:4]:
         parts.append({"type": "image_url",
                       "image_url": {"url": "data:image/jpeg;base64," + f["b64"]}})
-    if provider == "gemini":
-        payload = {
-            "model": config.FLASH_STYLE_MODEL,
-            "max_tokens": 250,
-            "temperature": 0.0,
-            "messages": [{"role": "user", "content": parts}],
-        }
-        base, key = config.GEMINI_OPENAI_BASE, config.GEMINI_API_KEY
-    else:
-        payload = {
-            "model": config.TEXT_FALLBACK_MODEL,
-            "max_tokens": 200,
-            "temperature": 0.0,
-            "reasoning_effort": "none",
-            "messages": [{"role": "user", "content": parts}],
-        }
-        base, key = config.FIREWORKS_BASE, config.FIREWORKS_API_KEY
     try:
-        resp = await chat_completion(
-            client, base, key, payload,
-            timeout=timeout, retries=0, provider=provider if provider == "gemini" else "fireworks",
-        )
+        if provider == "gemini":
+            payload = {
+                "max_tokens": 250,
+                "temperature": 0.0,
+                "messages": [{"role": "user", "content": parts}],
+            }
+            resp = await gemini_chain_call(client, payload, timeout,
+                                           config.flash_style_chain())
+        else:
+            payload = {
+                "model": config.TEXT_FALLBACK_MODEL,
+                "max_tokens": 200,
+                "temperature": 0.0,
+                "reasoning_effort": "none",
+                "messages": [{"role": "user", "content": parts}],
+            }
+            resp = await chat_completion(
+                client, config.FIREWORKS_BASE, config.FIREWORKS_API_KEY, payload,
+                timeout=timeout, retries=0,
+            )
         data = extract_json(strip_thought(message_content(resp))) or {}
         out = {}
         picks = []

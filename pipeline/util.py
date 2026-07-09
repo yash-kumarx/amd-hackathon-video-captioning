@@ -78,6 +78,26 @@ def errstr(e: BaseException) -> str:
     return f"{type(e).__name__}: {str(e)[:160]}"
 
 
+async def gemini_chain_call(
+    client: httpx.AsyncClient, payload: Dict[str, Any], timeout: float,
+    chain: List, retries: int = 0,
+) -> Dict[str, Any]:
+    """Try (model, key) pairs in order against the Gemini OpenAI-compat endpoint —
+    availability and quota differ per account/project, so the chain IS the retry."""
+    from . import config  # local import; config has no util dependency
+    last: Optional[Exception] = None
+    for model, key in chain:
+        p = dict(payload, model=model)
+        try:
+            return await chat_completion(
+                client, config.GEMINI_OPENAI_BASE, key, p,
+                timeout=timeout, retries=retries, provider="gemini")
+        except Exception as e:
+            last = e
+            log.warning("gemini chain: %s failed (%s) — next", model, str(e)[:90])
+    raise last if last else RuntimeError("empty gemini chain")
+
+
 class TransientAPIError(Exception):
     pass
 

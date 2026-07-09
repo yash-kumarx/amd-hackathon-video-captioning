@@ -11,7 +11,7 @@ from typing import Optional
 import httpx
 
 from . import config
-from .util import chat_completion, message_content
+from .util import gemini_chain_call, message_content
 
 log = logging.getLogger("pipeline.transcribe")
 
@@ -28,7 +28,6 @@ async def transcribe(client: httpx.AsyncClient, wav_path: str) -> Optional[str]:
         with open(wav_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
         payload = {
-            "model": config.AUDIO_MODEL,
             "max_tokens": 1200,
             "temperature": 0.0,
             "messages": [{
@@ -39,9 +38,8 @@ async def transcribe(client: httpx.AsyncClient, wav_path: str) -> Optional[str]:
                 ],
             }],
         }
-        resp = await chat_completion(
-            client, config.GEMINI_OPENAI_BASE, config.GEMINI_API_KEY,
-            payload, timeout=config.AUDIO_TIMEOUT, retries=1, provider="gemini",
+        resp = await gemini_chain_call(
+            client, payload, config.AUDIO_TIMEOUT, config.audio_chain(), retries=0,
         )
         text = message_content(resp).strip()
         return text or None

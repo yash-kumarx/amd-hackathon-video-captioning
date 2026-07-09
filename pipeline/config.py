@@ -49,11 +49,37 @@ GEMMA_MODEL = os.environ.get("GEMMA_MODEL", "gemma-4-31b-it")
 # re-enable via env if it recovers. Empty string = no second Gemma model in the chain.
 GEMMA_MODEL_FALLBACK = os.environ.get("GEMMA_MODEL_FALLBACK", "")
 AUDIO_MODEL = os.environ.get("AUDIO_MODEL", "gemini-2.5-flash")  # Fireworks audio deprecated 2026-06-10
-# Third styling candidate + verifier on gemini-2.5-flash (free tier, separate quota
-# from Gemma, strong native vision). ENABLE_FLASH_STYLE=0 turns the whole lane off.
+# Third styling candidate + verifier on the Gemini flash family (free tier, separate
+# quota from Gemma, strong native vision). ENABLE_FLASH_STYLE=0 turns the lane off.
+# Model availability DIFFERS BY ACCOUNT (older projects: 2.5-flash; newer: 3.x family
+# where 2.5 is retired) → calls walk a (model, key) chain, first success wins.
 FLASH_STYLE_MODEL = os.environ.get("FLASH_STYLE_MODEL", "gemini-2.5-flash")
 ENABLE_FLASH_STYLE = _flag("ENABLE_FLASH_STYLE", "1")
 FLASH_STYLE_FRAMES = int(os.environ.get("FLASH_STYLE_FRAMES", "8"))
+
+
+def flash_style_chain():
+    """(model, key) attempts for flash styling/verification, best-first.
+    gemini-3.1-flash-lite (new accounts): 1.3s, correct motion reading (probed);
+    gemini-2.5-flash (older accounts): proven, 4s."""
+    chain = []
+    if GEMINI_API_KEY_2:
+        chain += [("gemini-3.1-flash-lite", GEMINI_API_KEY_2),
+                  ("gemini-flash-lite-latest", GEMINI_API_KEY_2)]
+    if GEMINI_API_KEY:
+        chain += [(FLASH_STYLE_MODEL, GEMINI_API_KEY)]
+    return chain
+
+
+def audio_chain():
+    """(model, key) attempts for audio transcription (input_audio support proven on
+    2.5-flash; 3.1-flash-lite is multimodal on the newer account)."""
+    chain = []
+    if GEMINI_API_KEY:
+        chain += [(AUDIO_MODEL, GEMINI_API_KEY)]
+    if GEMINI_API_KEY_2:
+        chain += [("gemini-3.1-flash-lite", GEMINI_API_KEY_2)]
+    return chain
 # Last-resort styling fallback if Gemini API is entirely down (weakens Gemma story; logged loudly)
 TEXT_FALLBACK_MODEL = os.environ.get("TEXT_FALLBACK_MODEL", "accounts/fireworks/models/kimi-k2p6")
 
