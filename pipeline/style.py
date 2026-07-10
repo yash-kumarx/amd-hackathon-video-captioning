@@ -23,24 +23,27 @@ log = logging.getLogger("pipeline.style")
 
 RUBRICS = {
     "formal": (
-        "Neutral, precise, documentary register. Third-person. No slang, no jokes, "
-        "no first person, no exclamation marks."
+        "Neutral, precise, documentary register. Third-person, no slang, no jokes, no exclamation. "
+        "State the main subject, setting, and primary action using concrete visible details. "
+        "One polished sentence when possible."
     ),
     "sarcastic": (
-        "Dry, ironic understatement or mock-praise; humor comes from the incongruity between "
-        "a grand tone and mundane content. Deadpan delivery. Never mean-spirited, never breaks the facts. "
-        "Anchor the sarcasm in an emotion the viewer would plausibly feel (boredom, faux awe, mock suspense). "
-        "Vary your opening — do NOT default to 'Behold'."
+        "Unmistakably dry and mildly sarcastic — never mean, dramatic, or insulting. One short deadpan "
+        "punchline attached to a REAL visible detail; understatement over story. Patterns like "
+        "'because apparently…', 'clearly…', 'naturally…' work ONLY when they fit the visible action. "
+        "Must still read like a true video description, not a joke setup. Vary the opening; never 'Behold'. "
+        "One concise sentence, two short at most."
     ),
     "humorous_tech": (
-        "Playful humor built on ONE central tech/programming metaphor that genuinely fits what happens "
-        "in the video (a bug, a deploy, latency, buffering, a reboot…) — developed cleanly, not a pile "
-        "of stacked jargon. Name the actual subject doing the actual action; the metaphor decorates "
-        "the truth, it never replaces it. The joke should still land for a non-engineer."
+        "Light, clear tech humor: exactly ONE tech metaphor (queue, deploy, debug, API, latency, log, "
+        "cache, pipeline, rollback, commit, runtime, buffering, bug) attached to a REAL visible detail — "
+        "not a pile of jargon. Name the actual subject doing the actual action; the metaphor decorates "
+        "the truth, never replaces it. Must still read like a true description. One or two concise sentences."
     ),
     "humorous_non_tech": (
-        "Warm, everyday, relatable humor — witty-friend narration. Absolutely no tech jargon. "
-        "Observational comedy about what is REALLY happening on screen, not an invented skit."
+        "Warm everyday humor for a general audience, zero tech jargon. ONE obvious everyday comparison "
+        "attached to a REAL visible detail. May exaggerate the importance of a visible action, but must "
+        "read like a true video description, not an invented skit. One or two concise sentences."
     ),
 }
 
@@ -51,19 +54,30 @@ EXEMPLARS = {
     "humorous_non_tech": "This kitten has decided the entire garden is a personal obstacle course, and that leaf? Public enemy number one.",
 }
 
+# The discipline block — the single biggest accuracy lever. Injected into every
+# styling prompt. The judge scores accuracy hard: one invented detail tanks a caption.
+DISCIPLINE = (
+    "GROUNDING DISCIPLINE (the judge penalizes any invented detail):\n"
+    "- Use ONLY what the frames/FACTS show. Never invent actions the subject is not clearly doing — "
+    "no sniffing, speaking, fist-bumping, reaching, demanding, performing, celebrating, or reacting "
+    "unless it is actually visible.\n"
+    "- Use the observed setting EXACTLY. Do not rename it (no 'backyard', 'office', 'stage', 'kitchen', "
+    "'forest') unless that is what is shown.\n"
+    "- If a location, brand, city, org, or sign is not clearly readable, stay generic ('a city street', "
+    "'an indoor room') — never guess a specific name.\n"
+    "- Metaphors may exaggerate the importance of a VISIBLE action only; they must not imply unseen "
+    "objects, dialogue, plans, or intentions.\n"
+    "- Never mention missing audio, playback speed, filters, or video/encoding artifacts."
+)
+
 GEN_SYSTEM = (
-    "You write video captions in requested styles. Every caption MUST be factually grounded in the "
-    "provided FACTS json{vision_clause} — do not add events, objects, brands, or claims not present there. "
-    "Never mention missing audio, playback speed, or video/encoding artifacts. "
-    "English only. Each caption is 1-2 sentences, {wmin}-{wmax} words. "
-    "Think briefly (under 150 tokens): draft 2 angles per style, check each against the FACTS for "
-    "hallucination and against its rubric for register, keep only the sharper one — then answer. "
-    "Make each caption SPECIFIC to this video (name its actual subjects/actions, not generic filler), "
-    "and make the four styles clearly distinct from each other. "
-    "CRITICAL for the humorous/sarcastic styles: the joke must come from the REAL situation in "
-    "FACTS — never invent gestures, micro-events, sounds, or outcomes not present there. "
-    "Return STRICT JSON only (no markdown fences): {shape} "
-    "with exactly {n} caption(s) per style."
+    "You write video captions in requested styles, grounded in the provided FACTS json{vision_clause}. "
+    "English only. Prefer SHORT: {wmin}-{wmax} words, one concise sentence when the style allows. "
+    + DISCIPLINE + "\n"
+    "Think briefly (under 150 tokens): draft 2 angles per style, delete any detail not in FACTS, keep "
+    "the sharper survivor — then answer. Make each caption specific to THIS video and the four styles "
+    "clearly distinct. Every caption must still read like a true description of the video. "
+    "Return STRICT JSON only (no markdown fences): {shape} with exactly {n} caption(s) per style."
 )
 
 JUDGE_SYSTEM = (
@@ -399,18 +413,13 @@ async def kimi_style_sets(
     else:
         ground_clause = "in the provided FACTS json"
     sys_txt = (
-        f"You write video captions in requested styles. Every caption MUST be factually grounded "
-        f"{ground_clause} — do not add events, objects, brands, or claims that are not there. "
+        f"You write video captions in requested styles, grounded {ground_clause}. "
         "Identify the main subject correctly before writing. "
-        "Never mention missing audio, playback speed, or video/encoding artifacts. "
-        f"English only. Each caption is 1-2 sentences, {config.WORD_MIN}-{config.WORD_MAX} words — "
-        f"NEVER exceed {config.WORD_MAX} words, end every caption as a complete sentence. "
-        "Silently draft 2 angles per style, keep only the sharper one. Make each caption SPECIFIC "
-        "to this video (name its actual subjects/actions, not generic filler), and make the four "
-        "styles clearly distinct from each other. "
-        "CRITICAL for the humorous/sarcastic styles: the joke must come from the REAL visible "
-        "situation — never invent gestures, micro-events, sounds, or outcomes that are not clearly "
-        "shown. A reader must still learn exactly what the video shows (subject + action + setting). "
+        f"English only. Prefer SHORT: {config.WORD_MIN}-{config.WORD_MAX} words, one concise sentence "
+        f"when the style allows; NEVER exceed {config.WORD_MAX} words; end every caption complete. "
+        + DISCIPLINE + " "
+        "Silently draft 2 angles per style, delete any detail not clearly shown, keep the sharper "
+        "survivor. Make each caption specific to THIS video and the four styles clearly distinct. "
         f"Return STRICT JSON only (no markdown fences): {shape}"
     )
     facts_line = f"Preliminary FACTS (hint, may be wrong): {_facts_str(facts)}\n\n" if have_facts else ""
@@ -499,15 +508,12 @@ async def flash_style_set(
     )
     shape = "{" + ", ".join('"{}": "..."'.format(s) for s in styles) + "}"
     sys_txt = (
-        "You write video captions in requested styles. Every caption MUST be factually grounded "
-        "in what the keyframes actually show — do not add events, objects, brands, or claims "
-        "that are not there. Identify the main subject correctly before writing. "
-        "Never mention missing audio, playback speed, or video/encoding artifacts. "
-        f"English only. Each caption is 1-2 sentences, {config.WORD_MIN}-{config.WORD_MAX} words — "
-        f"NEVER exceed {config.WORD_MAX} words, end every caption as a complete sentence. "
-        "Make each caption SPECIFIC to this video and the four styles clearly distinct. "
-        "CRITICAL for the humorous/sarcastic styles: the joke must come from the REAL visible "
-        "situation — never invent gestures, micro-events, sounds, or outcomes not clearly shown. "
+        "You write video captions in requested styles, grounded in what the keyframes actually show. "
+        "Identify the main subject correctly before writing. "
+        f"English only. Prefer SHORT: {config.WORD_MIN}-{config.WORD_MAX} words, one concise sentence "
+        f"when the style allows; NEVER exceed {config.WORD_MAX} words; end every caption complete. "
+        + DISCIPLINE + " "
+        "Make each caption specific to THIS video and the four styles clearly distinct. "
         f"Return STRICT JSON only (no markdown fences): {shape}"
     )
     have_facts = bool(facts.subjects or facts.setting or facts.actions

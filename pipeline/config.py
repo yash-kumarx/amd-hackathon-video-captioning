@@ -171,6 +171,8 @@ GEMMA_VISION_FRAMES = int(os.environ.get("GEMMA_VISION_FRAMES", "3"))
 GEMMA_TEMP_GEN = float(os.environ.get("GEMMA_TEMP_GEN", "0.9"))
 GEMMA_TEMP_JUDGE = float(os.environ.get("GEMMA_TEMP_JUDGE", "0.0"))
 
-# Caption length band (verbosity-bias defense; RESEARCH.md §6)
-WORD_MIN = int(os.environ.get("WORD_MIN", "20"))
-WORD_MAX = int(os.environ.get("WORD_MAX", "45"))
+# Caption length band. SHORTENED: a floor of 20 forced padding, and padding is where
+# invention creeps in (top-ranked builds ship one concise sentence). Shorter = fewer
+# chances to hallucinate = higher accuracy axis.
+WORD_MIN = int(os.environ.get("WORD_MIN", "8"))
+WORD_MAX = int(os.environ.get("WORD_MAX", "32"))
