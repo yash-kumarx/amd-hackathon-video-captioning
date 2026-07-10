@@ -76,6 +76,22 @@ def flash_style_chain():
     return chain
 
 
+def flash_preview_chain():
+    """Full-size gen-3 flash: stronger captions, flakier availability (503/timeouts).
+    Runs as a SEPARATE parallel candidate so failures cost nothing."""
+    chain = []
+    if GEMINI_API_KEY_3:
+        chain += [("gemini-3-flash-preview", GEMINI_API_KEY_3)]
+    if GEMINI_API_KEY_2:
+        chain += [("gemini-3-flash-preview", GEMINI_API_KEY_2)]
+    return chain
+
+
+# Measured Jul 10: preview lane DROPPED verify coverage 15/15 -> 6/15 (503-flaky
+# model + doubled RPM pressure) and gained nothing. Off by default; env-flippable.
+ENABLE_FLASH_PREVIEW = _flag("ENABLE_FLASH_PREVIEW", "0")
+
+
 def audio_chain():
     """(model, key) attempts for audio transcription (input_audio support proven on
     2.5-flash; 3.1-flash-lite is multimodal on the newer account)."""

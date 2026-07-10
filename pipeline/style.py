@@ -485,7 +485,7 @@ _flash_last = [0.0]
 
 async def flash_style_set(
     client: httpx.AsyncClient, facts: GroundedFacts, styles: List[str], timeout: float,
-    frames: Optional[List[Dict]] = None,
+    frames: Optional[List[Dict]] = None, chain=None,
 ) -> Dict[str, str]:
     """Third candidate set from gemini-2.5-flash (free tier, separate quota from Gemma,
     strong native vision). Paced by a small semaphore + min-gap to stay under free-tier
@@ -537,7 +537,7 @@ async def flash_style_set(
             await asyncio.sleep(gap)
         _flash_last[0] = _t.monotonic()
         resp = await gemini_chain_call(client, payload, timeout,
-                                       config.flash_style_chain())
+                                       chain if chain is not None else config.flash_style_chain())
     lowered = _norm_style_dict(extract_json(strip_thought(message_content(resp))) or {}, styles)
     out = {}
     for s in styles:

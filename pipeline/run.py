@@ -139,6 +139,7 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
     gemma_task: Optional[asyncio.Task] = None
     kimi_task: Optional[asyncio.Task] = None
     flash_task: Optional[asyncio.Task] = None
+    flash2_task: Optional[asyncio.Task] = None
     try:
         n = config.BEST_OF_N
         gemma_started = asyncio.Event()
@@ -160,6 +161,13 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                 style.flash_style_set(
                     client, facts, styles,
                     min(9.0, max(4.0, sw.remaining - 2)), frames=frames))
+            # Fourth candidate: full-size gen-3 flash (stronger, flakier) in parallel
+            if config.ENABLE_FLASH_PREVIEW:
+                flash2_task = asyncio.ensure_future(
+                    style.flash_style_set(
+                        client, facts, styles,
+                        min(8.0, max(4.0, sw.remaining - 3)), frames=frames,
+                        chain=config.flash_preview_chain()))
         cands: Dict[str, List[str]] = {}
         # Wait for the serial Gemma lane up to the point where a minimal Gemma round
         # could still finish before the wire; past that, Gemma can't win anyway.
@@ -238,16 +246,21 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                 # Merge: Kimi floor, then flash's full set if Kimi died, then partial Gemma
                 merged = dict(kimi_res)
                 flash_primary = False
-                if not merged and flash_task is not None and sw.remaining > 0.5:
-                    try:
-                        fset = await asyncio.wait_for(
-                            asyncio.shield(flash_task), timeout=max(0.3, sw.remaining - 0.4))
-                        if fset:
-                            merged = dict(fset)
-                            flash_primary = True
-                            log.info("[%s] flash set used as primary (kimi missed)", task.task_id)
-                    except (asyncio.TimeoutError, Exception):
-                        pass
+                if not merged and sw.remaining > 0.5:
+                    for ftask in (flash2_task, flash_task):  # preview (stronger) first
+                        if ftask is None:
+                            continue
+                        try:
+                            fset = await asyncio.wait_for(
+                                asyncio.shield(ftask), timeout=max(0.3, sw.remaining - 0.4))
+                            if fset:
+                                merged = dict(fset)
+                                flash_primary = True
+                                log.info("[%s] flash set used as primary (kimi missed)",
+                                         task.task_id)
+                                break
+                        except (asyncio.TimeoutError, Exception):
+                            continue
                 for s, c in (cands or {}).items():
                     if s not in merged and c:
                         merged[s] = c[0]
@@ -269,8 +282,23 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                     asyncio.shield(flash_task), timeout=max(0.3, sw.remaining - 4.2))
             except (asyncio.TimeoutError, Exception):
                 pass
-            if flash_set and len(flash_set) == len(styles) and sw.remaining > 4.0:
-                pools = {s: [captions[s], flash_set[s]] for s in styles}
+            flash2_set: Dict[str, str] = {}
+            if flash2_task is not None and sw.remaining > 4.2:
+                try:
+                    flash2_set = await asyncio.wait_for(
+                        asyncio.shield(flash2_task), timeout=max(0.2, sw.remaining - 4.0))
+                except (asyncio.TimeoutError, Exception):
+                    pass
+            have_extra = (flash_set and len(flash_set) == len(styles)) or \
+                         (flash2_set and len(flash2_set) == len(styles))
+            if have_extra and sw.remaining > 4.0:
+                pools = {s: [captions[s]] for s in styles}
+                if flash_set and len(flash_set) == len(styles):
+                    for s in styles:
+                        pools[s].append(flash_set[s])
+                if flash2_set and len(flash2_set) == len(styles):
+                    for s in styles:
+                        pools[s].append(flash2_set[s])
                 try:
                     picked = await style.pick_from_pools(
                         client, frames, pools, styles,
@@ -278,14 +306,16 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                         provider="gemini")
                     if picked and all(picked.get(s) for s in styles):
                         captions = picked
-                        styled_by += "+flash-verified"
-                        log.info("[%s] flash verify applied (t=%.1fs)", task.task_id, sw.elapsed)
+                        nsets = max(len(v) for v in pools.values())
+                        styled_by += f"+verified{nsets}"
+                        log.info("[%s] verify across %d sets applied (t=%.1fs)",
+                                 task.task_id, nsets, sw.elapsed)
                 except Exception:
                     pass
     except Exception as e:
         log.warning("[%s] styling stage error: %s (t=%.1fs)", task.task_id, errstr(e), sw.elapsed)
     finally:
-        for t in (gemma_task, kimi_task, flash_task):
+        for t in (gemma_task, kimi_task, flash_task, flash2_task):
             if t is not None and not t.done():
                 t.cancel()
 
