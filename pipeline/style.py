@@ -121,7 +121,7 @@ def init_concurrency() -> None:
     INTERNAL — verified live; two keys = two independent projects = 2x throughput).
     Calls within a lane are additionally spaced by GEMMA_MIN_GAP seconds."""
     global _gemma_lanes
-    keys = [k for k in (config.GEMINI_API_KEY, config.GEMINI_API_KEY_2) if k]
+    keys = [k for k in (config.GEMINI_API_KEY, config.GEMINI_API_KEY_2, config.GEMINI_API_KEY_3) if k]
     _gemma_lanes = [
         {"sem": asyncio.Semaphore(config.GEMMA_CONCURRENCY), "key": k, "last": 0.0}
         for k in keys

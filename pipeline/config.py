@@ -27,8 +27,9 @@ def _secret(name: str) -> str:
 
 FIREWORKS_API_KEY = _secret("FIREWORKS_API_KEY")
 GEMINI_API_KEY = _secret("GEMINI_API_KEY")
-# Optional second Gemini project key: adds an independent serial Gemma lane (2x throughput)
+# Optional second/third Gemini project keys: independent quota pools + serial Gemma lanes
 GEMINI_API_KEY_2 = _secret("GEMINI_API_KEY_2")
+GEMINI_API_KEY_3 = _secret("GEMINI_API_KEY_3")
 # Optional OpenRouter key: google/gemma-4-31b-it:free = same Gemma, independent capacity pool
 OPENROUTER_API_KEY = _secret("OPENROUTER_API_KEY")
 
@@ -64,10 +65,14 @@ def flash_style_chain():
     gemini-2.5-flash (older accounts): proven, 4s."""
     chain = []
     if GEMINI_API_KEY_2:
-        chain += [("gemini-3.1-flash-lite", GEMINI_API_KEY_2),
-                  ("gemini-flash-lite-latest", GEMINI_API_KEY_2)]
+        chain += [("gemini-3.1-flash-lite", GEMINI_API_KEY_2)]
+    if GEMINI_API_KEY_3:
+        # callable on older-catalog accounts even when unlisted (probed)
+        chain += [("gemini-3.1-flash-lite", GEMINI_API_KEY_3)]
     if GEMINI_API_KEY:
         chain += [(FLASH_STYLE_MODEL, GEMINI_API_KEY)]
+    if GEMINI_API_KEY_3:
+        chain += [("gemini-2.5-flash", GEMINI_API_KEY_3)]
     return chain
 
 
@@ -77,6 +82,8 @@ def audio_chain():
     chain = []
     if GEMINI_API_KEY:
         chain += [(AUDIO_MODEL, GEMINI_API_KEY)]
+    if GEMINI_API_KEY_3:
+        chain += [("gemini-2.5-flash", GEMINI_API_KEY_3)]
     if GEMINI_API_KEY_2:
         chain += [("gemini-3.1-flash-lite", GEMINI_API_KEY_2)]
     return chain

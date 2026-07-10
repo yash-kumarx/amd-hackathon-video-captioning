@@ -229,21 +229,34 @@ async def process_clip(client: httpx.AsyncClient, task: Task,
                     gemma_task.cancel()  # free the serial lane for the next clip
                 kimi_res: Dict[str, str] = {}
                 try:
+                    # Leave ~2s so the flash rescue below can still read its (usually
+                    # long-finished) result if Kimi dies at the wire.
                     kimi_res = await asyncio.wait_for(
-                        asyncio.shield(kimi_task), timeout=max(2.0, sw.remaining - 0.3))
+                        asyncio.shield(kimi_task), timeout=max(2.0, sw.remaining - 2.0))
                 except Exception as e2:
                     log.warning("[%s] kimi styling failed: %s", task.task_id, errstr(e2))
-                # Merge: Kimi floor, topped up by any partial Gemma styles we did get
+                # Merge: Kimi floor, then flash's full set if Kimi died, then partial Gemma
                 merged = dict(kimi_res)
+                flash_primary = False
+                if not merged and flash_task is not None and sw.remaining > 0.5:
+                    try:
+                        fset = await asyncio.wait_for(
+                            asyncio.shield(flash_task), timeout=max(0.3, sw.remaining - 0.4))
+                        if fset:
+                            merged = dict(fset)
+                            flash_primary = True
+                            log.info("[%s] flash set used as primary (kimi missed)", task.task_id)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
                 for s, c in (cands or {}).items():
                     if s not in merged and c:
                         merged[s] = c[0]
                 if merged:
                     captions = merged
-                    styled_by = "kimi-backup" if not cands else "gemma+kimi"
-                    lvl = log.warning if styled_by == "kimi-backup" else log.info
-                    lvl("[%s] GEMMA MISSED — styled via %s, %d/%d styles (t=%.1fs)",
-                        task.task_id, styled_by, len(captions), len(styles), sw.elapsed)
+                    styled_by = "flash" if flash_primary else \
+                        ("kimi-backup" if kimi_res else "gemma-partial")
+                    log.warning("[%s] styled via %s, %d/%d styles (t=%.1fs)",
+                                task.task_id, styled_by, len(captions), len(styles), sw.elapsed)
 
         # --- Additive verify step: if the flash set also landed, let a fast frame-
         # grounded verifier pick per style between the primary result and flash's.
